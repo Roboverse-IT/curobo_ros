@@ -102,6 +102,8 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 | `robot_config_file` | from descriptor | Resolved cuRobo robot YAML |
 | `cameras_config_file` | `''` | Camera configuration YAML |
 | `node_is_available` | `false` | Read-only status: flips to `true` once warmup completes |
+| `joint_names` | from the robot model | Read-only: the planner's joint order, used by every joint vector in and out |
+| `tool_frames` | from the robot model | Read-only: the tool frames a multi-frame goal names (`target_tool_frames`, `IkBatch.tool_frames`, `Fk.tool_frames`) |
 
 ## `robot_segmentation` node parameters
 

@@ -23,7 +23,8 @@ Request:
 |---|---|---|
 | `start_pose` | `sensor_msgs/JointState` | All planners. Empty = current robot state |
 | `target_pose` | `geometry_msgs/Pose` | Classic planner (single Cartesian goal) |
-| `target_poses` | `geometry_msgs/Pose[]` | Multi-point planner (sequence of waypoints) |
+| `target_poses` | `geometry_msgs/Pose[]` | Multi-point planner (sequence of waypoints); classic planner with `target_tool_frames` |
+| `target_tool_frames` | `string[]` | Classic planner, robots with several tool frames (e.g. dual-arm): `target_poses[k]` is the goal of `target_tool_frames[k]`, all reached by one trajectory. Name every tool frame of the robot (the read-only `tool_frames` parameter); a frame that must stay put gets its current pose. Empty = the single-goal behaviour above. Other planners refuse it |
 | `target_joint_positions` | `float64[]` | Joint-space planner |
 | `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags for the single goal |
 | `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo) |
@@ -38,6 +39,8 @@ Response:
 | `dt` | `float64` | Time step between waypoints (seconds) |
 
 The active planner decides which target field it consumes: sending `target_pose` while the joint-space planner is active will not do what you expect. Switch planners first with `set_planner`.
+
+Joint vectors (`start_pose`, `target_joint_positions`, the returned `trajectory`) follow the order of the read-only `joint_names` parameter, which is the planner's order and not necessarily the order of the cuRobo YAML's `cspace`. The returned trajectory carries the planned joints only, also on a robot with locked joints (`lock_joints`).
 
 ```bash
 ros2 service call /unified_planner/generate_trajectory curobo_msgs/srv/TrajectoryGeneration \
@@ -90,9 +93,9 @@ Request:
 
 | Field | Type | Notes |
 |---|---|---|
-| `type` | `int8` | `CUBOID=0`, `SPHERE=1`, `CAPSULE=2`, `CYLINDER=3`, `MESH=4` |
+| `type` | `int8` | `CUBOID=0`, `SPHERE=1`, `CAPSULE=2`, `CYLINDER=3`, `MESH=4`, `USD=5` |
 | `name` | `string` | Must be unique |
-| `mesh_file_path` | `string` | Mesh only; absolute path to `.stl`/`.obj` |
+| `mesh_file_path` | `string` | Mesh or USD only; absolute path to `.stl`/`.obj`, or to a `.usd`/`.usda` |
 | `pose` | `geometry_msgs/Pose` | In the robot base frame |
 | `dimensions` | `geometry_msgs/Vector3` | Semantics depend on `type` (see below) |
 | `color` | `std_msgs/ColorRGBA` | Visualization only |
@@ -106,6 +109,9 @@ Dimension semantics by type:
 | Capsule | radius | — | length |
 | Cylinder | radius | — | height |
 | Mesh | scale X | scale Y | scale Z |
+| USD | scale X | scale Y | scale Z |
+
+A `USD` obstacle is the first mesh prim of the file; `pose` places the file's root, so the prim's own pose in the file is kept. A mesh smaller than the robot's largest collision sphere would read as in collision everywhere in cuRobo v0.8.0: its bounding box is widened with vertices no face uses, the surface is unchanged (`curobo_ros/core/scene_sanitizer.py`).
 
 Response: `success`, `message` (e.g. `Object 'table' added ...`).
 
@@ -129,11 +135,30 @@ Type: `std_srvs/srv/Trigger`. Response `message` lists the current obstacle name
 
 ### `/unified_planner/attach_object` / `/unified_planner/detach_object`
 
-Types: `curobo_msgs/srv/AttachObject` (request: `object_name`) and `std_srvs/srv/Trigger`. Attaches an existing scene obstacle to the robot flange so it moves with the arm and is collision-checked, then releases it. Requires the robot configuration to define an `attached_object` extra link — see [Tutorial 3](../tutorials/03-collision-objects.md).
+Types: `curobo_msgs/srv/AttachObject` and `std_srvs/srv/Trigger`. Attaches an existing scene obstacle to the robot flange so it moves with the arm and is collision-checked, then releases it. Requires the robot configuration to define an `attached_object` extra link — see [Tutorial 3](../tutorials/03-collision-objects.md).
+
+`AttachObject` request:
+
+| Field | Type | Notes |
+|---|---|---|
+| `object_name` | `string` | The scene obstacle to attach; it is disabled in the world while attached |
+| `attach_link` | `string` | Empty = `attached_object`. A robot with one attach link per arm names it here |
+| `sphere_fit_type` | `int8` | `FIT_DEFAULT=0` (the library default, MorphIt), `FIT_SURFACE=1`, `FIT_VOXEL=2`, `FIT_MORPHIT=3` |
+| `num_spheres` | `int32` | `0` = estimated from the geometry; either way capped at the link's sphere budget |
+
+The message also carries `type`, `header`, `mesh_file_path`, `pose` and `dimensions`, meant to describe a payload that is not a scene obstacle; that form is not implemented yet and `object_name` is required. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel.
+
+### `/unified_planner/detach_link`
+
+Type: `curobo_msgs/srv/RemoveObject`, whose `name` is the attach link to release. For robots with several attach links (one per arm); `detach_object` keeps releasing `attached_object`. Response `message`: `Detached '<object>' from '<link>'`, or `Nothing attached to '<link>'`.
 
 ### `/unified_planner/set_link_collision`
 
 Type: `curobo_msgs/srv/SetLinkCollision`. Enables or disables the collision spheres of specific robot links (useful when grasping: disable the gripper links against the grasped part). Request: `link_names` (string[]), `enabled` (bool). Response: `success`, `message`, `applied_links`, `unknown_links`. All solvers share the same kinematics configuration, so one call affects planning, MPC, and IK alike. The state persists until the opposite call.
+
+### `/unified_planner/set_obstacle_collision`
+
+Type: `curobo_msgs/srv/SetLinkCollision`, the same request as `set_link_collision`, for scene obstacles instead of robot links: `link_names` are obstacle names. Switches obstacles off and on without removing them (a part the gripper is about to close on, for instance). The state persists until the opposite call, across `add_object` / `remove_object` and every other world update, and reaches every solver (planner, IK services, MPC). Response: `success`, `message`, `applied_links`, `unknown_links`. Switching a *mesh* obstacle off needs `apply_curobo_patches: true` in the robot descriptor in cuRobo v0.8.0 (see [Tutorial 2](../tutorials/02-adding-your-robot.md)).
 
 ### `/unified_planner/set_collision_spheres_enabled`
 
@@ -147,7 +172,9 @@ Request: bounding box in the robot base frame (metres): `bbox_min_x/y/z`, `bbox_
 
 ### `/unified_planner/get_collision_distance`
 
-Type: `curobo_msgs/srv/GetCollisionDistance` (empty request). Returns the collision distance of each robot sphere at the current joint state: `data` (`float32[]`) and `nb_sphere` (`int8`).
+Type: `curobo_msgs/srv/GetCollisionDistance`. Returns the collision distance of each robot sphere at the current joint state: `data` (`float32[]`), `nb_sphere` (`int8`, spheres per configuration) and `nb_config` (`1`).
+
+Optional request `trajectory` (`sensor_msgs/JointState[]`, in the order of the `joint_names` parameter): the same quantity for every configuration, config-major (`data[i * nb_sphere + s]` is sphere `s` at `trajectory[i]`, `nb_config` configurations), evaluated with the planner's model, attached payloads included. The value is cuRobo's collision cost with activation distance `d` (`collision_activation_distance`): `0` while a sphere is farther than `d` from every obstacle, and a sphere penetrates by `value - d/2` once `value` exceeds `d/2`.
 
 ### `/unified_planner/set_collision_cache`
 
@@ -176,9 +203,19 @@ Type: `curobo_msgs/srv/Ik`. Request: `pose` (`geometry_msgs/Pose`, robot base fr
 
 Type: `curobo_msgs/srv/IkBatch`. Same as `ik` with arrays: `poses[]` in, `joint_states[]` / `joint_states_valid[]` out. Poses are solved in parallel on the GPU.
 
+Optional request fields, empty or `0` = the behaviour above:
+
+| Field | Type | Notes |
+|---|---|---|
+| `tool_frames` | `string[]` | One IK problem per group of `len(tool_frames)` consecutive poses: `poses[j * len(tool_frames) + k]` is the goal of `tool_frames[k]` in problem `j`. Name every tool frame of the robot |
+| `return_seeds` | `int32` | Solutions per problem, problem-major, each with its own validity |
+| `start_pose` | `sensor_msgs/JointState` | Configuration the solver starts from (one of its seeds), for every problem |
+
 ### `/unified_planner/fk`
 
 Type: `curobo_msgs/srv/Fk`. Request: `joint_states` (`sensor_msgs/JointState[]`). Response: `poses` (`geometry_msgs/Pose[]`), `joint_states_valid`, `error_msg`.
+
+Optional request `tool_frames` (`string[]`): the poses of those frames, config-major (`poses[i * len(tool_frames) + k]` is `tool_frames[k]` at `joint_states[i]`). Empty = the robot's first tool frame.
 
 See [Tutorial 6](../tutorials/06-ik-fk-services.md) for worked examples.
 
@@ -213,7 +250,8 @@ Goal (mirrors `TrajectoryGeneration`; the active planner decides which fields it
 |---|---|---|
 | `start_pose` | `sensor_msgs/JointState` | Empty = current state |
 | `target_pose` | `geometry_msgs/Pose` | Classic / MPC / Retarget |
-| `target_poses` | `geometry_msgs/Pose[]` | Multi-point |
+| `target_poses` | `geometry_msgs/Pose[]` | Multi-point; classic with `target_tool_frames` |
+| `target_tool_frames` | `string[]` | Classic: one goal per tool frame, as in `generate_trajectory` |
 | `target_joint_positions` | `float64[]` | Joint-space |
 | `allow_cached` | `bool` (default `true`) | Reuse a matching, non-expired trajectory from a previous `generate_trajectory` call |
 
