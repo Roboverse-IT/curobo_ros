@@ -54,6 +54,18 @@ fi
 ((TOTAL_TESTS++)) || true
 echo ""
 
+echo "Running test_test_dual_arm..."
+if timeout 530 launch_test "${TEST_DIR}/test_test_dual_arm.py" > /dev/null 2>&1; then
+    echo "  ✓ test_test_dual_arm PASSED"
+    ((PASSED_TESTS++)) || true
+else
+    echo "  ✗ test_test_dual_arm FAILED"
+    ((FAILED_TESTS++)) || true
+    FAILED_TEST_LIST+=("test_test_dual_arm")
+fi
+((TOTAL_TESTS++)) || true
+echo ""
+
 echo "Running test_test_trajectory..."
 if timeout 350 launch_test "${TEST_DIR}/test_test_trajectory.py" > /dev/null 2>&1; then
     echo "  ✓ test_test_trajectory PASSED"

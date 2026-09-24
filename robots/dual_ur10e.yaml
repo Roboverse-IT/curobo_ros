@@ -1,0 +1,14 @@
+# Robot descriptor -- cuRobo's stock dual UR10e: two arms, two tool frames, the
+# example dual-arm robot. A bare curobo_config name that is not next to this file
+# resolves among cuRobo's bundled robots (see robot/robot_description.py).
+# apply_curobo_patches: lets a mesh obstacle be disabled (and so attached).
+# Emulator strategy: no hardware. Used by config/config_test/test_dual_arm.yaml.
+name: dual_ur10e
+display_name: "Dual UR10e (emulator)"
+
+curobo_config: dual_ur10e.yml
+apply_curobo_patches: true
+
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states

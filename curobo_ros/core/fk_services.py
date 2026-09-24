@@ -97,21 +97,35 @@ class FKServices:
         js = CuRoboJS.from_position(q, joint_names=self._fk_model.joint_names)
         kin_state = self._fk_model.compute_kinematics(js)
 
-        # ToolPose.position/quaternion: [B, H=1, L, 3/4]; take first tool frame.
+        # ToolPose.position/quaternion: [B, H=1, L, 3/4], one L entry per tool
+        # frame. No tool_frames in the request -> the first one, as always;
+        # otherwise the requested ones, config-major (see Fk.srv).
         # v2 quaternion is wxyz; ROS geometry_msgs.Pose.orientation is xyzw.
-        positions = kin_state.tool_poses.position[:, 0, 0, :].cpu().numpy()
-        quaternions = kin_state.tool_poses.quaternion[:, 0, 0, :].cpu().numpy()
+        frame_idx = [0]
+        if request.tool_frames:
+            all_frames = list(self._fk_model.tool_frames)
+            unknown = [f for f in request.tool_frames if f not in all_frames]
+            if unknown:
+                msg = f"FK: unknown tool frames {unknown}, the robot has {all_frames}"
+                self._node.get_logger().error(msg)
+                response.error_msg.data = msg
+                return response
+            frame_idx = [all_frames.index(f) for f in request.tool_frames]
+        positions = kin_state.tool_poses.position[:, 0, :, :].cpu().numpy()
+        quaternions = kin_state.tool_poses.quaternion[:, 0, :, :].cpu().numpy()
 
-        for pos, ori in zip(positions, quaternions):
-            pose = Pose()
-            pose.position.x = float(pos[0])
-            pose.position.y = float(pos[1])
-            pose.position.z = float(pos[2])
-            pose.orientation.w = float(ori[0])
-            pose.orientation.x = float(ori[1])
-            pose.orientation.y = float(ori[2])
-            pose.orientation.z = float(ori[3])
-            response.poses.append(pose)
+        for frames_pos, frames_ori in zip(positions, quaternions):
+            for k in frame_idx:
+                pos, ori = frames_pos[k], frames_ori[k]
+                pose = Pose()
+                pose.position.x = float(pos[0])
+                pose.position.y = float(pos[1])
+                pose.position.z = float(pos[2])
+                pose.orientation.w = float(ori[0])
+                pose.orientation.x = float(ori[1])
+                pose.orientation.y = float(ori[2])
+                pose.orientation.z = float(ori[3])
+                response.poses.append(pose)
 
         return response
 

@@ -36,6 +36,10 @@ class MultiPointPlanner(SinglePlanner):
         goal_request,
         config: dict,
     ):
+        if getattr(goal_request, 'target_tool_frames', None):
+            raise ValueError(
+                f"{self.get_planner_name()} takes one tool frame: target_tool_frames is "
+                f"only for the classic planner")
         # Extract waypoints from request (MultiPointPlanner uses target_poses).
         # v2 Pose.from_list expects [x, y, z, qw, qx, qy, qz] (wxyz).
         tool_frame = self.motion_planner.tool_frames[0]

@@ -983,6 +983,7 @@ class UnifiedPlannerNode(Node):
             'target_pose': self._pose_tuple(tp) if tp is not None else None,
             'target_poses': [self._pose_tuple(p) for p in poses] if poses else None,
             'target_joints': [float(x) for x in (getattr(req, 'target_joint_positions', []) or [])],
+            'tool_frames': list(getattr(req, 'target_tool_frames', []) or []),
         }
 
     @staticmethod
@@ -999,6 +1000,8 @@ class UnifiedPlannerNode(Node):
     def _signatures_match(self, a, b, pos_tol=1e-3, ori_tol=1e-2, joint_tol=1e-3) -> bool:
         if len(a['start']) != len(b['start']) or any(
                 abs(x - y) > joint_tol for x, y in zip(a['start'], b['start'])):
+            return False
+        if a.get('tool_frames', []) != b.get('tool_frames', []):
             return False
         aj, bj = a['target_joints'], b['target_joints']
         if len(aj) != len(bj) or any(abs(x - y) > joint_tol for x, y in zip(aj, bj)):

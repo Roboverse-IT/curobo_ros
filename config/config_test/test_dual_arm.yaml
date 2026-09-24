@@ -1,0 +1,98 @@
+# Dual-arm contract on cuRobo's stock dual UR10e (robots/dual_ur10e.yaml): two
+# tool frames, tool1 and tool0. These cases check shapes, outcomes and messages
+# (the generator has no numeric tolerance); every new field left empty keeps
+# the single-arm behaviour, which the other suites check.
+#
+# START = the robot's default configuration, in the planner's joint order (the
+# read-only `joint_names` parameter: the arm with the _1 suffix comes first, not
+# the order of the yml's cspace). The two goals are the FK of START with joints
+# 1-2 of each arm moved by +-0.2 rad: reachable and collision-free by
+# construction (checked when written: the plan succeeds).
+
+package: curobo_ros
+environment:
+  launch:
+    - package: curobo_ros
+      executable: gen_traj_test_dual_arm.launch.py
+      name: gen_traj_dual_arm
+  # Same readiness probe as the other suites (see test_collision.yaml).
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+
+tests:
+  - name: "01 warmup FK"
+    service: "/unified_planner/warmup_fk"
+    type: curobo_msgs/srv/WarmupFK
+    data:
+      batch_size: 1
+    expect: {success: True}
+
+  - name: "02 FK of both tool frames"
+    service: "/unified_planner/fk"
+    type: curobo_msgs/srv/Fk
+    data:
+      joint_states:
+        - position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      tool_frames: ["tool1", "tool0"]
+    expect: {poses: {$len: 2}}
+
+  - name: "03 FK without tool_frames is the first frame only"
+    service: "/unified_planner/fk"
+    type: curobo_msgs/srv/Fk
+    data:
+      joint_states:
+        - position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+    expect: {poses: {$len: 1}}
+
+  - name: "04 warmup IK"
+    service: "/unified_planner/warmup_ik"
+    type: curobo_msgs/srv/WarmupIK
+    data:
+      batch_size: 1
+    expect: {success: True}
+
+  - name: "05 IK of both tool frames, eight seeds, from START"
+    service: "/unified_planner/ik_batch"
+    type: curobo_msgs/srv/IkBatch
+    timeout: 90.0
+    data:
+      poses:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+        - position: {x: -0.0786, y: 0.3258, z: 0.8166}
+          orientation: {x: -0.6860, y: 0.6873, z: -0.1693, w: 0.1685}
+      tool_frames: ["tool1", "tool0"]
+      return_seeds: 8
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+    expect: {success: True, joint_states: {$len: 8}}
+
+  - name: "06 one trajectory for both tool frames"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    timeout: 90.0
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_poses:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+        - position: {x: -0.0786, y: 0.3258, z: 0.8166}
+          orientation: {x: -0.6860, y: 0.6873, z: -0.1693, w: 0.1685}
+      target_tool_frames: ["tool1", "tool0"]
+    expect: {success: True}
+
+  - name: "07 a goal for one frame of two is refused"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_poses:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      target_tool_frames: ["tool1"]
+    expect: {success: False, message: "Planning error: target_tool_frames%"}

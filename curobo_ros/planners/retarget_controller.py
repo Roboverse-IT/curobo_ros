@@ -76,6 +76,10 @@ class RetargetController(ReactiveController):
         return solver
 
     def setup(self, start_state: JointState, goal_request: Any) -> bool:
+        if getattr(goal_request, 'target_tool_frames', None):
+            raise ValueError(
+                f"{self.get_planner_name()} takes one tool frame: target_tool_frames is "
+                f"only for the classic planner")
         p = goal_request.target_pose
         raw = [
             p.position.x, p.position.y, p.position.z,

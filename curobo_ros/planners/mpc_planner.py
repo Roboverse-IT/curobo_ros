@@ -257,6 +257,10 @@ class MPCController(ReactiveController):
     def setup(self, start_state: JointState, goal_request: Any) -> bool:
         self._v_bc = None  # New goal = new velocity continuity baseline
         self._csv_init()
+        if getattr(goal_request, 'target_tool_frames', None):
+            raise ValueError(
+                f"{self.get_planner_name()} takes one tool frame: target_tool_frames is "
+                f"only for the classic planner")
         p = goal_request.target_pose
         raw = [
             p.position.x, p.position.y, p.position.z,

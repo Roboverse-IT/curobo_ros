@@ -104,6 +104,11 @@ class IKServices:
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
+        # tool_frames / return_seeds / start_pose all default to "unset": the
+        # path below them is the one that existed before these fields did.
+        if request.tool_frames or request.return_seeds > 0 or request.start_pose.position:
+            return self._ik_batch_frames(request, response)
+
         ok, result = self._solve(request.poses)
         if not ok:
             response.success = False
@@ -117,6 +122,84 @@ class IKServices:
             valid.data = bool(result.success.cpu().numpy()[i][0])
             response.joint_states.append(js)
             response.joint_states_valid.append(valid)
+        response.success = True
+        return response
+
+    def _ik_batch_frames(self, request: IkBatch.Request, response: IkBatch.Response):
+        """IkBatch with tool_frames, return_seeds or start_pose set (see IkBatch.srv):
+        one problem per group of len(tool_frames) poses, return_seeds solutions
+        per problem (problem-major), seeded from start_pose when given."""
+        def fail(msg):
+            self._node.get_logger().error(f"IK batch: {msg}")
+            response.success = False
+            response.error_msg.data = msg
+            return response
+
+        kin = self._ik_solver.kinematics
+        all_frames = list(kin.tool_frames)
+        frames = list(request.tool_frames) or all_frames[:1]
+        if len(set(frames)) != len(frames) or any(f not in all_frames for f in frames):
+            return fail(f"tool_frames {frames} must name distinct tool frames of {all_frames}")
+        if request.tool_frames and set(frames) != set(all_frames):
+            # cuRobo solves every tool frame of the robot at once.
+            return fail(f"tool_frames must list every tool frame of the robot: {all_frames}")
+        n = len(frames)
+        if not request.poses or len(request.poses) % n:
+            return fail(f"{len(request.poses)} poses is not a positive multiple of {n} tool frames")
+        problems = len(request.poses) // n
+        if problems != self._ik_batch_size:
+            try:
+                self._init(problems)
+            except Exception as e:
+                self._ik_batch_size = 0
+                return fail(f"reinit for batch_size={problems} failed: {e}")
+
+        # v2 Pose quaternion is wxyz; ROS geometry_msgs is xyzw.
+        poses = {}
+        for k, frame in enumerate(frames):
+            group = request.poses[k::n]
+            poses[frame] = CuroboPose(
+                position=torch.tensor(
+                    [[p.position.x, p.position.y, p.position.z] for p in group],
+                    dtype=self._dtype, device=self._device),
+                quaternion=torch.tensor(
+                    [[p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
+                     for p in group],
+                    dtype=self._dtype, device=self._device),
+            )
+        if request.tool_frames:
+            goal = GoalToolPose.from_poses(poses, ordered_tool_frames=all_frames, num_goalset=1)
+        else:
+            goal = GoalToolPose.from_poses(poses)
+
+        current_state = None
+        if request.start_pose.position:
+            q = list(request.start_pose.position)
+            names = list(kin.joint_names)
+            if len(q) != len(names):
+                return fail(f"start_pose has {len(q)} positions, the robot {len(names)} joints {names}")
+            current_state = CuRoboJS.from_position(
+                torch.tensor([q] * problems, dtype=self._dtype, device=self._device),
+                joint_names=names)
+
+        seeds = max(1, request.return_seeds)
+        try:
+            result = self._ik_solver.solve_pose(
+                goal_tool_poses=goal, current_state=current_state, return_seeds=seeds)
+        except Exception as e:
+            return fail(f"solve failed: {e}")
+        torch.cuda.synchronize()
+
+        solutions = result.solution.reshape(problems, seeds, -1).cpu().numpy()
+        valid = result.success.reshape(problems, seeds).cpu().numpy()
+        for j in range(problems):
+            for s in range(seeds):
+                js = JointState()
+                js.position = solutions[j, s].tolist()
+                ok = std_msgs.msg.Bool()
+                ok.data = bool(valid[j, s])
+                response.joint_states.append(js)
+                response.joint_states_valid.append(ok)
         response.success = True
         return response
 
