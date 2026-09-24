@@ -1,0 +1,33 @@
+# A robot described by an XRDF instead of a cuRobo yml: robots/ur10e_xrdf.yaml
+# (cuRobo's stock UR10e, `curobo_xrdf` + `urdf`). The node coming up at all is
+# half of the test: the descriptor is converted and loaded before any service
+# is advertised.
+
+package: curobo_ros
+environment:
+  launch:
+    - package: curobo_ros
+      executable: gen_traj_test_xrdf.launch.py
+      name: gen_traj_xrdf
+  # Same readiness probe as the other suites (see test_collision.yaml).
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+
+tests:
+  - name: "01 warmup FK"
+    service: "/unified_planner/warmup_fk"
+    type: curobo_msgs/srv/WarmupFK
+    data:
+      batch_size: 1
+    expect: {success: True}
+
+  - name: "02 FK of the XRDF-loaded UR10e"
+    service: "/unified_planner/fk"
+    type: curobo_msgs/srv/Fk
+    data:
+      joint_states:
+        - position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    expect: {poses: {$len: 1}}

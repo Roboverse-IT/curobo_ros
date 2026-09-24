@@ -20,6 +20,17 @@ Canonical vs descriptor data:
   plain file path (the whole codebase passes a path to the v2 factories).
 
 Adding a robot = drop a ``robots/<name>.yaml`` + its cuRobo config; no core edit.
+
+A robot described by NVIDIA's XRDF instead of a cuRobo yml sets ``curobo_xrdf``
+and ``urdf`` in place of ``curobo_config``. The XRDF is converted by cuRobo's
+own ``convert_xrdf_to_curobo`` and written as a resolved cuRobo yml, the same
+runtime copy described above, so everything downstream still receives a plain
+yml path. Bare relative paths that do not exist next to the descriptor resolve
+where cuRobo keeps its own content (robot configs for the XRDF, assets for the
+URDF), as cuRobo itself does for its bundled robots.
+
+``apply_curobo_patches: true`` opts the robot into the fixes in
+``core/curobo_patches.py`` (off by default).
 """
 
 import hashlib
@@ -101,6 +112,41 @@ def resolve_curobo_config(curobo_path: str) -> str:
     return resolved_path
 
 
+def _resolve_curobo_content(path: str, base_dir: str, content_dir: str) -> str:
+    """``_resolve_uri``, plus cuRobo's own convention for bare relative paths:
+    relative to the descriptor if the file is there, else inside ``content_dir``
+    (where cuRobo keeps its bundled robot configs / assets)."""
+    if path.startswith('package://') or os.path.isabs(path):
+        return _resolve_uri(path, base_dir)
+    candidate = os.path.normpath(os.path.join(base_dir, path))
+    if os.path.exists(candidate):
+        return candidate
+    return os.path.normpath(os.path.join(content_dir, path))
+
+
+def convert_xrdf_config(xrdf_path: str, urdf_path: str) -> str:
+    """Convert an XRDF + URDF pair to a cuRobo robot yml and return its path.
+
+    The conversion is cuRobo's (``convert_xrdf_to_curobo``); its output already
+    carries an absolute ``urdf_path``. Written next to the other resolved copies,
+    keyed on both source paths, and rewritten on every load so an edited XRDF is
+    never shadowed by a stale copy.
+    """
+    from curobo._src.types.content_path import ContentPath
+    from curobo._src.util.xrdf_util import convert_xrdf_to_curobo
+
+    cfg = convert_xrdf_to_curobo(
+        ContentPath(robot_xrdf_file=xrdf_path, robot_urdf_file=urdf_path))
+    key = f'{os.path.abspath(xrdf_path)}|{os.path.abspath(urdf_path)}'
+    digest = hashlib.sha1(key.encode()).hexdigest()[:10]
+    name = os.path.splitext(os.path.basename(xrdf_path))[0]
+    os.makedirs(_RESOLVED_DIR, exist_ok=True)
+    out = os.path.join(_RESOLVED_DIR, f'{name}-xrdf-{digest}.yml')
+    with open(out, 'w') as f:
+        _yaml.safe_dump(cfg, f, default_flow_style=None, sort_keys=False)
+    return out
+
+
 @dataclass
 class RobotDescription:
     """Resolved, ready-to-use description of one robot."""
@@ -112,6 +158,7 @@ class RobotDescription:
     base_link: str
     strategy_key: str
     strategy_params: dict = field(default_factory=dict)
+    apply_curobo_patches: bool = False   # opt-in, see core/curobo_patches.py
     _joint_names: Optional[List[str]] = None
     _dof: Optional[int] = None
 
@@ -149,10 +196,24 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
     strategy_key = desc.get('strategy', 'emulator')
     strategy_params = desc.get('strategy_params', {}) or {}
 
+    desc_dir = os.path.dirname(desc_path)
     curobo_uri = desc.get('curobo_config')
-    if not curobo_uri:
-        raise ValueError(f"Descriptor {desc_path} is missing required 'curobo_config'")
-    curobo_path = _resolve_uri(curobo_uri, os.path.dirname(desc_path))
+    xrdf_uri = desc.get('curobo_xrdf')
+    if xrdf_uri:
+        if curobo_uri:
+            raise ValueError(
+                f"Descriptor {desc_path} sets both 'curobo_config' and 'curobo_xrdf': pick one")
+        urdf_uri = desc.get('urdf')
+        if not urdf_uri:
+            raise ValueError(f"Descriptor {desc_path}: 'curobo_xrdf' needs 'urdf'")
+        from curobo.content import get_assets_path, get_robot_configs_path
+        curobo_path = convert_xrdf_config(
+            _resolve_curobo_content(xrdf_uri, desc_dir, get_robot_configs_path()),
+            _resolve_curobo_content(urdf_uri, desc_dir, get_assets_path()))
+    else:
+        if not curobo_uri:
+            raise ValueError(f"Descriptor {desc_path} is missing required 'curobo_config'")
+        curobo_path = _resolve_uri(curobo_uri, desc_dir)
 
     # Resolve the two portability-sensitive paths (urdf_path/asset_root_path)
     # FIRST, emitting a resolved copy if either needed rewriting — see
@@ -181,6 +242,7 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
         base_link=base_link,
         strategy_key=strategy_key,
         strategy_params=strategy_params,
+        apply_curobo_patches=bool(desc.get('apply_curobo_patches', False)),
         _joint_names=fallback_joints,
         _dof=len(fallback_joints) if fallback_joints else None,
     )

@@ -32,6 +32,25 @@ strategy_params:
 
 To add *your* robot: drop `robots/my_robot.yaml` next to the existing ones, point `curobo_config` at your cuRobo YAML, pick a strategy, rebuild the workspace, and launch with `robot:=my_robot`.
 
+### A robot described by an XRDF
+
+If the robot is described by NVIDIA's [XRDF](https://nvidia-isaac-ros.github.io/concepts/manipulation/xrdf.html) instead of a cuRobo YAML, set `curobo_xrdf` and `urdf` in place of `curobo_config`:
+
+```yaml
+name: ur10e_xrdf
+curobo_xrdf: ur10e.xrdf                    # package://, absolute, or relative
+urdf: robot/ur_description/ur10e.urdf
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states
+```
+
+The XRDF is converted by cuRobo's own `convert_xrdf_to_curobo` into a cuRobo YAML (written under `/tmp/curobo_ros_resolved/`), so the rest of curobo_ros sees a plain cuRobo config. A bare relative path that does not exist next to the descriptor resolves inside cuRobo's own content, as it does for cuRobo's bundled robots: the example above is `robots/ur10e_xrdf.yaml`, cuRobo's stock UR10e.
+
+### Opt-in cuRobo fixes
+
+`apply_curobo_patches: true` applies the fixes in `curobo_ros/core/curobo_patches.py` before any solver is built: disabling a *mesh* obstacle (which cuRobo v0.8.0 cannot do when a cuboid cache exists, and which attaching a mesh object relies on), and a joint reindex that fails when locked joints precede the active ones in the chain. Off by default.
+
 ## 2. The cuRobo robot configuration
 
 The reference example is `curobo_doosan/src/m1013/m1013.yml`. The essential structure:
@@ -93,7 +112,8 @@ Then connect the real driver via the descriptor's `strategy_params` — see [Tut
 | Symptom | Likely cause |
 |---|---|
 | Node crashes at startup parsing the config | Wrong indentation or missing `kinematics` keys in the cuRobo YAML |
-| `Descriptor ... is missing required 'curobo_config'` | The descriptor YAML lacks the `curobo_config` key |
+| `Descriptor ... is missing required 'curobo_config'` | The descriptor YAML lacks the `curobo_config` key (or `curobo_xrdf` + `urdf`) |
+| `Descriptor ...: 'curobo_xrdf' needs 'urdf'` | An XRDF descriptor without its URDF |
 | Plans collide with the real robot body | Sphere coverage too sparse — add/enlarge spheres |
 | IK always fails | `ee_link` name doesn't match the URDF, or joint limits are wrong |
 

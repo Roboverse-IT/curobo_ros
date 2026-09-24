@@ -1,0 +1,13 @@
+# Robot descriptor -- cuRobo's stock UR10e, described by its XRDF instead of a
+# cuRobo yml (curobo_xrdf + urdf, see robot/robot_description.py). Both paths are
+# bare names, so they resolve inside cuRobo's own content: no file of this repo.
+# Emulator strategy: no hardware. Used by config/config_test/test_xrdf.yaml.
+name: ur10e_xrdf
+display_name: "UR10e from XRDF (emulator)"
+
+curobo_xrdf: ur10e.xrdf
+urdf: robot/ur_description/ur10e.urdf
+
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states

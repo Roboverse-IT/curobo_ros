@@ -86,6 +86,15 @@ class UnifiedPlannerNode(Node):
 
         self.robot_context = RobotContext(self)
 
+        # Opt-in cuRobo v0.8.0 fixes (core/curobo_patches.py), applied here:
+        # after the descriptor that asks for them is loaded, before any solver
+        # or kinematics model exists. Off unless the descriptor sets
+        # apply_curobo_patches: true.
+        if self.robot_context.description.apply_curobo_patches:
+            from curobo_ros.core.curobo_patches import apply as apply_curobo_patches
+            apply_curobo_patches()
+            self.get_logger().info("cuRobo patches applied (robot descriptor: apply_curobo_patches)")
+
         self.declare_parameter('planner_type', 'classic')
         self.declare_parameter('max_attempts', 1)
         # Feedback publish cadence (s) during open-loop execution. NOTE: this is
