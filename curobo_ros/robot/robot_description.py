@@ -29,6 +29,10 @@ yml path. Bare relative paths that do not exist next to the descriptor resolve
 where cuRobo keeps its own content (robot configs for the XRDF, assets for the
 URDF), as cuRobo itself does for its bundled robots.
 
+A bare ``curobo_config`` name that does not exist next to the descriptor is one
+of cuRobo's bundled robots (``curobo_config: dual_ur10e.yml``), again as cuRobo
+reads it; its URDF paths are made absolute in the resolved copy.
+
 ``apply_curobo_patches: true`` opts the robot into the fixes in
 ``core/curobo_patches.py`` (off by default).
 """
@@ -124,6 +128,27 @@ def _resolve_curobo_content(path: str, base_dir: str, content_dir: str) -> str:
     return os.path.normpath(os.path.join(content_dir, path))
 
 
+def bundled_curobo_config(name: str) -> str:
+    """One of cuRobo's bundled robot ymls, with its ``urdf_path`` and
+    ``asset_root_path`` made absolute against cuRobo's assets (where cuRobo
+    itself resolves them), written as a resolved copy. The absolute paths are
+    what the launch file hands to robot_state_publisher."""
+    from curobo.content import get_assets_path, get_robot_configs_path
+
+    src = os.path.join(get_robot_configs_path(), name)
+    cfg = load_yaml(src)
+    kin = cfg.get('robot_cfg', cfg).get('kinematics', {})
+    for key in ('urdf_path', 'asset_root_path'):
+        if kin.get(key) and not os.path.isabs(kin[key]):
+            kin[key] = os.path.join(get_assets_path(), kin[key])
+    digest = hashlib.sha1(os.path.abspath(src).encode()).hexdigest()[:10]
+    os.makedirs(_RESOLVED_DIR, exist_ok=True)
+    out = os.path.join(_RESOLVED_DIR, f'{os.path.splitext(name)[0]}-bundled-{digest}.yml')
+    with open(out, 'w') as f:
+        _yaml.safe_dump(cfg, f, default_flow_style=None, sort_keys=False)
+    return out
+
+
 def convert_xrdf_config(xrdf_path: str, urdf_path: str) -> str:
     """Convert an XRDF + URDF pair to a cuRobo robot yml and return its path.
 
@@ -214,6 +239,11 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
         if not curobo_uri:
             raise ValueError(f"Descriptor {desc_path} is missing required 'curobo_config'")
         curobo_path = _resolve_uri(curobo_uri, desc_dir)
+        if (not os.path.exists(curobo_path) and not os.path.isabs(curobo_uri)
+                and not curobo_uri.startswith('package://')):
+            # Not next to the descriptor: a bare name of one of cuRobo's
+            # bundled robots (e.g. dual_ur10e.yml), as cuRobo itself reads it.
+            curobo_path = bundled_curobo_config(curobo_uri)
 
     # Resolve the two portability-sensitive paths (urdf_path/asset_root_path)
     # FIRST, emitting a resolved copy if either needed rewriting — see
