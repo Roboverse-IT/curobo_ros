@@ -25,6 +25,7 @@ from launch_ros.substitutions import FindPackageShare
 from curobo_msgs.srv import AddObject
 from curobo_msgs.srv import AttachObject
 from curobo_msgs.srv import RemoveObject
+from curobo_msgs.srv import GetCollisionDistance
 
 @launch_testing.ready_to_test_action_timeout(90.0)
 @pytest.mark.launch_test
@@ -410,6 +411,322 @@ class GeneratedTestSuite(unittest.TestCase):
         self.assertTrue(
             response.message.startswith("Detach error:"),
             f"Field 'message' value {{  response.message  }} doesn't match pattern 'Detach error: %'"
+        )
+
+    def test_09_add_block_1_around_tool1(self):
+        """09 add block_1 around tool1"""
+
+        # Create service client
+        client = self.node.create_client(AddObject, '/unified_planner/add_object')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/add_object' not available after {timeout}s")
+
+        # Create request
+        request = AddObject.Request()
+        set_message_fields(request, {'type': 0, 'name': 'block_1', 'pose': {'position': {'x': -0.4402, 'y': 0.6846, 'z': 0.1608}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'dimensions': {'x': 0.12, 'y': 0.12, 'z': 0.12}, 'color': {'r': 0.2, 'g': 0.6, 'b': 1.0, 'a': 1.0}})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/add_object' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/add_object' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+    def test_10_add_block_far(self):
+        """10 add block_far"""
+
+        # Create service client
+        client = self.node.create_client(AddObject, '/unified_planner/add_object')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/add_object' not available after {timeout}s")
+
+        # Create request
+        request = AddObject.Request()
+        set_message_fields(request, {'type': 0, 'name': 'block_far', 'pose': {'position': {'x': 3.0, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'dimensions': {'x': 0.1, 'y': 0.1, 'z': 0.1}, 'color': {'r': 0.2, 'g': 0.6, 'b': 1.0, 'a': 1.0}})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/add_object' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/add_object' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+    def test_11_block_1_touches_arm_1(self):
+        """11 block_1 touches arm 1"""
+
+        # Create service client
+        client = self.node.create_client(GetCollisionDistance, '/unified_planner/get_collision_distance')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/get_collision_distance' not available after {timeout}s")
+
+        # Create request
+        request = GetCollisionDistance.Request()
+        set_message_fields(request, {'trajectory': [{'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/get_collision_distance' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/get_collision_distance' failed")
+
+
+        self.assertEqual(
+            response.nb_config,
+            1,
+            f"Field 'nb_config' doesn't match expected value"
+        )
+
+        self.assertGreaterEqual(
+            sum(list(response.data)),
+            0.1,
+            f"Field 'data' sum {sum(list(response.data))} is below expected minimum 0.1"
+        )
+
+    def test_12_arm_1_holds_block_1(self):
+        """12 arm 1 holds block_1"""
+
+        # Create service client
+        client = self.node.create_client(AttachObject, '/unified_planner/attach_object')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/attach_object' not available after {timeout}s")
+
+        # Create request
+        request = AttachObject.Request()
+        set_message_fields(request, {'object_name': 'block_1', 'attach_link': 'attached_object_1', 'sphere_fit_type': 1, 'num_spheres': 4})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/attach_object' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/attach_object' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.message,
+            "Attached 'block_1'",
+            f"Field 'message' doesn't match expected value"
+        )
+
+    def test_13_arm_0_holds_block_far_the_last_attach(self):
+        """13 arm 0 holds block_far: the last attach"""
+
+        # Create service client
+        client = self.node.create_client(AttachObject, '/unified_planner/attach_object')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/attach_object' not available after {timeout}s")
+
+        # Create request
+        request = AttachObject.Request()
+        set_message_fields(request, {'object_name': 'block_far', 'attach_link': 'attached_object_0', 'sphere_fit_type': 1, 'num_spheres': 4})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/attach_object' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/attach_object' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.message,
+            "Attached 'block_far'",
+            f"Field 'message' doesn't match expected value"
+        )
+
+    def test_14_release_arm_1_only(self):
+        """14 release arm 1 only"""
+
+        # Create service client
+        client = self.node.create_client(RemoveObject, '/unified_planner/detach_link')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/detach_link' not available after {timeout}s")
+
+        # Create request
+        request = RemoveObject.Request()
+        set_message_fields(request, {'name': 'attached_object_1'})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/detach_link' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/detach_link' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.message,
+            "Detached 'block_1' from 'attached_object_1'",
+            f"Field 'message' doesn't match expected value"
+        )
+
+    def test_15_block_1_is_back_in_the_world_while_arm_0_still_holds(self):
+        """15 block_1 is back in the world while arm 0 still holds"""
+
+        # Create service client
+        client = self.node.create_client(GetCollisionDistance, '/unified_planner/get_collision_distance')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/get_collision_distance' not available after {timeout}s")
+
+        # Create request
+        request = GetCollisionDistance.Request()
+        set_message_fields(request, {'trajectory': [{'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/get_collision_distance' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/get_collision_distance' failed")
+
+
+        self.assertEqual(
+            response.nb_config,
+            1,
+            f"Field 'nb_config' doesn't match expected value"
+        )
+
+        self.assertGreaterEqual(
+            sum(list(response.data)),
+            0.1,
+            f"Field 'data' sum {sum(list(response.data))} is below expected minimum 0.1"
+        )
+
+    def test_16_release_arm_0(self):
+        """16 release arm 0"""
+
+        # Create service client
+        client = self.node.create_client(RemoveObject, '/unified_planner/detach_link')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/detach_link' not available after {timeout}s")
+
+        # Create request
+        request = RemoveObject.Request()
+        set_message_fields(request, {'name': 'attached_object_0'})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/detach_link' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/detach_link' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.message,
+            "Detached 'block_far' from 'attached_object_0'",
+            f"Field 'message' doesn't match expected value"
         )
 
 @launch_testing.post_shutdown_test()

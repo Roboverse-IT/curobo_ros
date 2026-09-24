@@ -54,7 +54,7 @@ The startup planner is set by the `planner_type` parameter (default `classic`).
 All solvers — `MotionPlanner`, `ModelPredictiveControl`, `InverseKinematics` — are built from the same `ConfigWrapperMotion` context: same robot model, same `Scene`, same collision caches, same perception ESDF. Consequences:
 
 - An obstacle added via `add_object` is immediately seen by planning, MPC, and IK alike.
-- `set_link_collision` affects every solver in one call.
+- `set_link_collision`, `set_obstacle_collision` and `attach_object` affect every solver in one call. Each solver holds its own copy of the robot's collision spheres and of the obstacles' on/off state; the node keeps the copies in step, also for a solver built later.
 - There is no separate "MPC world" to keep in sync.
 
 ## IK and FK services

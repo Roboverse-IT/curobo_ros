@@ -109,6 +109,9 @@ class RobotModelManager:
                 else:
                     kc.disable_link_spheres(link)
                 applied.append(link)
+        # Set on this model; every solver has its own copy of the spheres.
+        if applied and hasattr(self.node, 'apply_robot_sphere_states'):
+            self.node.apply_robot_sphere_states()
         return applied, unknown
 
     def set_link_collision_callback(

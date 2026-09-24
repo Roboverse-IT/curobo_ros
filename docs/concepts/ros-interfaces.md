@@ -141,24 +141,24 @@ Types: `curobo_msgs/srv/AttachObject` and `std_srvs/srv/Trigger`. Attaches an ex
 
 | Field | Type | Notes |
 |---|---|---|
-| `object_name` | `string` | The scene obstacle to attach; it is disabled in the world while attached |
+| `object_name` | `string` | The scene obstacle to attach; it is off in the world, for every solver and across world updates, until released |
 | `attach_link` | `string` | Empty = `attached_object`. A robot with one attach link per arm names it here |
 | `sphere_fit_type` | `int8` | `FIT_DEFAULT=0` (the library default, MorphIt), `FIT_SURFACE=1`, `FIT_VOXEL=2`, `FIT_MORPHIT=3` |
 | `num_spheres` | `int32` | `0` = estimated from the geometry; either way capped at the link's sphere budget |
 
-The message also carries `type`, `header`, `mesh_file_path`, `pose` and `dimensions`, meant to describe a payload that is not a scene obstacle; that form is not implemented yet and `object_name` is required. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel.
+The message also carries `type`, `header`, `mesh_file_path`, `pose` and `dimensions`, meant to describe a payload that is not a scene obstacle; that form is not implemented yet and `object_name` is required. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel. The fitted spheres reach every solver: `ik` / `ik_batch` answers account for the payload.
 
 ### `/unified_planner/detach_link`
 
-Type: `curobo_msgs/srv/RemoveObject`, whose `name` is the attach link to release. For robots with several attach links (one per arm); `detach_object` keeps releasing `attached_object`. Response `message`: `Detached '<object>' from '<link>'`, or `Nothing attached to '<link>'`.
+Type: `curobo_msgs/srv/RemoveObject`, whose `name` is the attach link to release. For robots with several attach links (one per arm); `detach_object` keeps releasing `attached_object`. The released object is back in the world (unless switched off with `set_obstacle_collision`), whatever the other links still hold. Response `message`: `Detached '<object>' from '<link>'`, or `Nothing attached to '<link>'`.
 
 ### `/unified_planner/set_link_collision`
 
-Type: `curobo_msgs/srv/SetLinkCollision`. Enables or disables the collision spheres of specific robot links (useful when grasping: disable the gripper links against the grasped part). Request: `link_names` (string[]), `enabled` (bool). Response: `success`, `message`, `applied_links`, `unknown_links`. All solvers share the same kinematics configuration, so one call affects planning, MPC, and IK alike. The state persists until the opposite call.
+Type: `curobo_msgs/srv/SetLinkCollision`. Enables or disables the collision spheres of specific robot links (useful when grasping: disable the gripper links against the grasped part). Request: `link_names` (string[]), `enabled` (bool). Response: `success`, `message`, `applied_links`, `unknown_links`. One call affects planning, IK, MPC and the retargeter alike: the node copies the spheres to every solver, also to one built later. The state persists until the opposite call.
 
 ### `/unified_planner/set_obstacle_collision`
 
-Type: `curobo_msgs/srv/SetLinkCollision`, the same request as `set_link_collision`, for scene obstacles instead of robot links: `link_names` are obstacle names. Switches obstacles off and on without removing them (a part the gripper is about to close on, for instance). The state persists until the opposite call, across `add_object` / `remove_object` and every other world update, and reaches every solver (planner, IK services, MPC). Response: `success`, `message`, `applied_links`, `unknown_links`. Switching a *mesh* obstacle off needs `apply_curobo_patches: true` in the robot descriptor in cuRobo v0.8.0 (see [Tutorial 2](../tutorials/02-adding-your-robot.md)).
+Type: `curobo_msgs/srv/SetLinkCollision`, the same request as `set_link_collision`, for scene obstacles instead of robot links: `link_names` are obstacle names. Switches obstacles off and on without removing them (a part the gripper is about to close on, for instance). The state persists until the opposite call, across `add_object` / `remove_object` and every other world update, and reaches every solver (planner, IK services, MPC, retargeter). An attached obstacle stays off until released, whatever this service is told. Response: `success`, `message`, `applied_links`, `unknown_links`. Switching a *mesh* obstacle off needs `apply_curobo_patches: true` in the robot descriptor in cuRobo v0.8.0 (see [Tutorial 2](../tutorials/02-adding-your-robot.md)).
 
 ### `/unified_planner/set_collision_spheres_enabled`
 
@@ -197,7 +197,7 @@ Types: `curobo_msgs/srv/WarmupIK`, `curobo_msgs/srv/WarmupFK`. Request: `batch_s
 
 ### `/unified_planner/ik`
 
-Type: `curobo_msgs/srv/Ik`. Request: `pose` (`geometry_msgs/Pose`, robot base frame). Response: `joint_states` (`sensor_msgs/JointState`), `joint_states_valid` (`std_msgs/Bool`), `error_msg` (`std_msgs/String`), `success`. The IK solve is collision-aware and shares the scene with the motion planner.
+Type: `curobo_msgs/srv/Ik`. Request: `pose` (`geometry_msgs/Pose`, robot base frame). Response: `joint_states` (`sensor_msgs/JointState`), `joint_states_valid` (`std_msgs/Bool`), `error_msg` (`std_msgs/String`), `success`. The IK solve is collision-aware and shares with the motion planner the scene and the robot's collision state: links switched off, objects attached.
 
 ### `/unified_planner/ik_batch`
 

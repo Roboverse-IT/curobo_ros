@@ -2,6 +2,7 @@
 # attach link per arm. Two parts read from USD, one held by each arm at the same
 # time, then released link by link. The parts are named scene obstacles
 # (AttachObject.object_name); the fit and the sphere count are chosen per call.
+# Then the world state when one arm lets go while the other still holds.
 
 package: curobo_ros
 environment:
@@ -105,3 +106,85 @@ tests:
     data:
       name: "no_such_link"
     expect: {success: False, message: "Detach error: %"}
+
+  # --- One arm released while the other still holds: the released object is
+  # back in the world. cuRobo's attachment manager remembers only the obstacles
+  # of the LAST attach, so on its own it would switch the held one back on and
+  # leave this one off. block_1 sits around tool1 at the zero configuration,
+  # where the emulator stands (attach fits there): switched on, it touches the
+  # arm-1 spheres. block_far is away from everything.
+  - name: "09 add block_1 around tool1"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    data:
+      type: 0
+      name: "block_1"
+      pose:
+        position: {x: -0.4402, y: 0.6846, z: 0.1608}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 0.12, y: 0.12, z: 0.12}
+      color: {r: 0.2, g: 0.6, b: 1.0, a: 1.0}
+    expect: {success: True}
+
+  - name: "10 add block_far"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    data:
+      type: 0
+      name: "block_far"
+      pose:
+        position: {x: 3.0, y: 0.0, z: 0.5}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 0.1, y: 0.1, z: 0.1}
+      color: {r: 0.2, g: 0.6, b: 1.0, a: 1.0}
+    expect: {success: True}
+
+  - name: "11 block_1 touches arm 1"
+    service: "/unified_planner/get_collision_distance"
+    type: curobo_msgs/srv/GetCollisionDistance
+    data:
+      trajectory:
+        - position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    expect: {nb_config: 1, data: {$sum_min: 0.1}}
+
+  - name: "12 arm 1 holds block_1"
+    service: "/unified_planner/attach_object"
+    type: curobo_msgs/srv/AttachObject
+    data:
+      object_name: "block_1"
+      attach_link: "attached_object_1"
+      sphere_fit_type: 1
+      num_spheres: 4
+    expect: {success: True, message: "Attached 'block_1'"}
+
+  - name: "13 arm 0 holds block_far: the last attach"
+    service: "/unified_planner/attach_object"
+    type: curobo_msgs/srv/AttachObject
+    data:
+      object_name: "block_far"
+      attach_link: "attached_object_0"
+      sphere_fit_type: 1
+      num_spheres: 4
+    expect: {success: True, message: "Attached 'block_far'"}
+
+  - name: "14 release arm 1 only"
+    service: "/unified_planner/detach_link"
+    type: curobo_msgs/srv/RemoveObject
+    data:
+      name: "attached_object_1"
+    expect: {success: True, message: "Detached 'block_1' from 'attached_object_1'"}
+
+  - name: "15 block_1 is back in the world while arm 0 still holds"
+    service: "/unified_planner/get_collision_distance"
+    type: curobo_msgs/srv/GetCollisionDistance
+    data:
+      trajectory:
+        - position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    expect: {nb_config: 1, data: {$sum_min: 0.1}}
+
+  - name: "16 release arm 0"
+    service: "/unified_planner/detach_link"
+    type: curobo_msgs/srv/RemoveObject
+    data:
+      name: "attached_object_0"
+    expect: {success: True, message: "Detached 'block_far' from 'attached_object_0'"}

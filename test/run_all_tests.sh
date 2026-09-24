@@ -115,7 +115,7 @@ fi
 echo ""
 
 echo "Running test_test_dual_arm_attach..."
-if timeout 780 launch_test "${TEST_DIR}/test_test_dual_arm_attach.py" > /dev/null 2>&1; then
+if timeout 860 launch_test "${TEST_DIR}/test_test_dual_arm_attach.py" > /dev/null 2>&1; then
     echo "  ✓ test_test_dual_arm_attach PASSED"
     ((PASSED_TESTS++)) || true
 else

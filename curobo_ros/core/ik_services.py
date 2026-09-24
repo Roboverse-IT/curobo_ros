@@ -263,9 +263,10 @@ class IKServices:
         self._ik_solver.solve_pose(goal_tool_poses=goal)
         torch.cuda.synchronize()
 
-        # A new solver loads every obstacle switched on: re-apply the ones off.
-        if hasattr(self._node, 'apply_obstacle_states'):
-            self._node.apply_obstacle_states()
+        # A new solver starts from the robot YAML with every obstacle on: give it
+        # the robot's spheres (links off, objects attached) and the obstacles off.
+        if hasattr(self._node, 'apply_solver_states'):
+            self._node.apply_solver_states()
 
         self._node.get_logger().info("IK solver ready")
 

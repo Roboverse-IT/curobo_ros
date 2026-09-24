@@ -119,6 +119,10 @@ class ReactiveController(TrajectoryPlanner):
         """Build the cuRobo solver once, lazily, from the shared context."""
         if self.solver is None:
             self.solver = self.build_solver()
+            # A new solver starts from the robot YAML with every obstacle on:
+            # give it the robot's spheres and the obstacles off.
+            if hasattr(self.node, 'apply_solver_states'):
+                self.node.apply_solver_states()
         return self.solver
 
     def rebuild_solver(self):

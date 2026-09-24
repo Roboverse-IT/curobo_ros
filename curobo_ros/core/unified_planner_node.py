@@ -410,40 +410,98 @@ class UnifiedPlannerNode(Node):
         # recorded as off back off (no-op when there are none).
         self.apply_obstacle_states()
 
-    def _scene_collision_checkers(self):
-        """The scene collision checker of every solver that exists."""
+    def _solvers(self):
+        """Every cuRobo solver that exists and receives the world (the ones
+        update_all_solvers_world reaches).
+
+        Each one builds its own model from the robot YAML: state set on one --
+        an obstacle switched off, a link switched off, an object attached -- is
+        not seen by the others. apply_obstacle_states and
+        apply_robot_sphere_states carry it to all of them.
+        """
         # getattr throughout: this also runs while the node is still being
         # built (the first planner warmup), before every solver attribute exists.
+        retargeter = getattr(self, 'retargeter', None)
         solvers = (
             ('motion_planner', getattr(self, 'motion_planner', None)),
             ('ik_services', getattr(getattr(self, 'ik_services', None), '_ik_solver', None)),
             ('mpc', getattr(self, 'mpc', None)),
+            ('retarget_global_ik', getattr(retargeter, '_global_ik_solver', None)),
+            ('retarget_local_ik', getattr(retargeter, '_local_ik_solver', None)),
         )
-        return [(label, s.scene_collision_checker) for label, s in solvers
-                if s is not None and getattr(s, 'scene_collision_checker', None) is not None]
+        return [(label, s) for label, s in solvers if s is not None]
+
+    def _scene_collision_checkers(self):
+        """The scene collision checker of every solver that exists."""
+        return [(label, s.scene_collision_checker) for label, s in self._solvers()
+                if getattr(s, 'scene_collision_checker', None) is not None]
+
+    def _obstacles_off(self):
+        """The obstacles every solver must see switched off: the ones switched
+        off with set_obstacle_collision, and the ones attached to the robot --
+        their spheres travel with the arm, and the world copy left behind would
+        collide with them."""
+        obstacle_manager = getattr(
+            getattr(self, 'config_wrapper_motion', None), 'obstacle_manager', None)
+        attachment_services = getattr(self, 'attachment_services', None)
+        return (set(getattr(obstacle_manager, 'disabled_obstacles', ()))
+                | set(getattr(attachment_services, 'attached_names', ())))
 
     def apply_obstacle_states(self, names=None):
         """Apply the obstacles' on/off state to every solver. ``names`` None ->
-        only the obstacles recorded as off. Returns the names some solver
-        refused (e.g. a mesh without apply_curobo_patches: see curobo_patches)."""
+        only the obstacles that are off. Returns the names some solver refused
+        (e.g. a mesh without apply_curobo_patches: see curobo_patches)."""
         obstacle_manager = getattr(
             getattr(self, 'config_wrapper_motion', None), 'obstacle_manager', None)
         if obstacle_manager is None:
             return []
-        disabled = obstacle_manager.disabled_obstacles
-        names = list(disabled) if names is None else list(names)
+        off = self._obstacles_off()
+        names = list(off) if names is None else list(names)
+        # an obstacle no longer in the scene (removed while attached) has no state
+        names = [n for n in names if n in obstacle_manager.obstacle_names]
         if not names:
             return []
         failed = []
-        for name in names:
-            for label, checker in self._scene_collision_checkers():
-                try:
-                    checker.enable_obstacle(name, name not in disabled)
-                except Exception as e:
-                    self.get_logger().error(f"obstacle '{name}' in {label}: {e}")
-                    if name not in failed:
-                        failed.append(name)
+        with self.gpu_lock:   # a plan in progress reads these flags
+            for name in names:
+                for label, checker in self._scene_collision_checkers():
+                    try:
+                        checker.enable_obstacle(name, name not in off)
+                    except Exception as e:
+                        self.get_logger().error(f"obstacle '{name}' in {label}: {e}")
+                        if name not in failed:
+                            failed.append(name)
         return failed
+
+    def apply_robot_sphere_states(self):
+        """Copy the robot's collision spheres -- links switched off with
+        set_link_collision, objects attached -- from the node's robot model
+        (RobotModelManager's, where they are set) to every solver. Returns the
+        solvers that refused."""
+        kin = getattr(getattr(self, 'config_wrapper_motion', None), 'kin_model', None)
+        if kin is None:
+            return []
+        src = kin.kinematics_config.link_spheres
+        failed = []
+        with self.gpu_lock:   # a plan in progress reads these spheres
+            for label, solver in self._solvers():
+                kc = getattr(getattr(solver, 'kinematics', None), 'kinematics_config', None)
+                if kc is None or kc.link_spheres is src:
+                    continue
+                dst = kc.link_spheres
+                try:
+                    # in place: a captured CUDA graph keeps reading the same memory
+                    dst.copy_(src.to(device=dst.device, dtype=dst.dtype).expand_as(dst))
+                except RuntimeError as e:
+                    self.get_logger().error(f"robot collision spheres in {label}: {e}")
+                    failed.append(label)
+        return failed
+
+    def apply_solver_states(self):
+        """Robot and obstacle state onto every solver. For a solver just built:
+        it starts from the robot YAML, with every obstacle switched on."""
+        self.apply_robot_sphere_states()
+        return self.apply_obstacle_states()
 
     def refresh_perception_world(self):
         """Recompute the perception ESDF and push it to all solvers.

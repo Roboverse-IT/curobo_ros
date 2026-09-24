@@ -20,6 +20,10 @@ Registers its own services (`<node>/attach_object`, `<node>/detach_object`,
 A robot with one attach link per arm (dual-arm) names the link in the request
 (``AttachObject.attach_link``) and releases it with ``detach_link``; left empty,
 everything works on ``attached_object`` as before.
+
+The fit is made on the MotionPlanner, then carried to every other solver (IK
+services, MPC, retargeter), each of which has its own copy of the robot's
+spheres: see the node's apply_robot_sphere_states / apply_obstacle_states.
 """
 
 from std_srvs.srv import Trigger
@@ -173,9 +177,32 @@ class AttachmentServices:
                 disable_obstacle_names=[object_name],
                 **fit,
             )
-        self._attached[link] = object_name
+            # The fit lands on the planner's spheres: copy it to the node's
+            # robot model, from which every solver takes its spheres.
+            self.config_wrapper.kin_model.kinematics_config.update_link_spheres(
+                link, am.kinematics_params.get_link_spheres(link))
+            self._attached[link] = object_name
+            self._apply_to_solvers(object_name)
         self.node.get_logger().info(
             f"Attached '{object_name}' to link '{link}'")
+
+    def _apply_to_solvers(self, object_name) -> None:
+        """Carry an attach or a detach to every solver: the robot's spheres, and
+        the obstacles' on/off state.
+
+        The obstacles are set from the node's own record (attached ones off,
+        the others as set_obstacle_collision left them), not from cuRobo's
+        attachment manager: that remembers only the obstacles of the LAST
+        attach, so with two attach links a detach re-enables the object the
+        other arm still holds and leaves the released one off.
+        """
+        node = self.node
+        if hasattr(node, 'apply_robot_sphere_states'):
+            node.apply_robot_sphere_states()
+        if hasattr(node, 'apply_obstacle_states'):
+            if object_name:
+                node.apply_obstacle_states([object_name])
+            node.apply_obstacle_states()
 
     @staticmethod
     def _estimate_sphere_need(obstacle) -> int:
@@ -211,7 +238,9 @@ class AttachmentServices:
         """Release the attached object (reset link spheres, re-enable the obstacle)."""
         with self.node.gpu_lock:
             self._attachment_manager().detach(link)
-        released = self._attached.pop(link, None)
+            self.config_wrapper.kin_model.kinematics_config.reset_link_spheres(link)
+            released = self._attached.pop(link, None)
+            self._apply_to_solvers(released)
         self.node.get_logger().info(f"Detached '{released}' from '{link}'")
         return released or ""
 

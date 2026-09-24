@@ -136,9 +136,10 @@ class ConfigWrapperMotion(ConfigWrapper):
         ])
         self.node_is_available = True
 
-        # A new planner loads every obstacle switched on: re-apply the ones off.
-        if hasattr(node, 'apply_obstacle_states'):
-            node.apply_obstacle_states()
+        # A new planner starts from the robot YAML with every obstacle on: give
+        # it the robot's spheres (links off, objects attached) and the obstacles off.
+        if hasattr(node, 'apply_solver_states'):
+            node.apply_solver_states()
 
         node.get_logger().info("Motion planner configured")
 

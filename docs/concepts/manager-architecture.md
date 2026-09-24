@@ -23,7 +23,7 @@ Resolves *what robot and world we are working with*: reads the `robot` parameter
 
 ### 2. `RobotModelManager` (`robot_model_manager.py`)
 
-Owns the cuRobo kinematics: `Kinematics(KinematicsCfg.from_robot_yaml_file(...))`, the robot collision spheres, and per-link collision toggling (`set_link_collision`). All solvers share this kinematics configuration.
+Owns the node's robot model: `Kinematics(KinematicsCfg.from_robot_yaml_file(...))`, the robot collision spheres, and per-link collision toggling (`set_link_collision`). Every solver builds its own model from the same robot YAML, so the robot's collision state kept here -- links switched off, objects attached -- is copied to every solver whenever it changes and whenever a solver is built (`UnifiedPlannerNode.apply_robot_sphere_states`).
 
 ### 3. `ObstacleManager` (`obstacle_manager.py`)
 
