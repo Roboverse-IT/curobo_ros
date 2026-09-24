@@ -1,6 +1,6 @@
 # ROS 2 Interfaces Reference
 
-This page is the normative reference for every topic, service, and action exposed by `curobo_ros`. All interface types come from the companion package [`curobo_msgs`](https://github.com/Lab-CORO/curobo_msgs) unless stated otherwise.
+This page is the normative reference for every topic, service, and action exposed by `curobo_ros`. All interface types come from the companion package [`curobo_msgs`](https://github.com/Roboverse-IT/curobo_msgs) unless stated otherwise.
 
 The package installs two executables:
 
