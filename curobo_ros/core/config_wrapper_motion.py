@@ -136,6 +136,10 @@ class ConfigWrapperMotion(ConfigWrapper):
         ])
         self.node_is_available = True
 
+        # A new planner loads every obstacle switched on: re-apply the ones off.
+        if hasattr(node, 'apply_obstacle_states'):
+            node.apply_obstacle_states()
+
         node.get_logger().info("Motion planner configured")
 
         if response is not None:

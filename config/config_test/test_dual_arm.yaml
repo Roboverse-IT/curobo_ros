@@ -96,3 +96,64 @@ tests:
           orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
       target_tool_frames: ["tool1"]
     expect: {success: False, message: "Planning error: target_tool_frames%"}
+
+  # --- World: an obstacle read from USD, switched off and on by name.
+  # Added after the planning cases so they do not change those scenes. A
+  # cuboid first, so a cuboid store exists: that is the condition under which
+  # cuRobo v0.8.0 cannot switch a MESH off without apply_curobo_patches (on in
+  # robots/dual_ur10e.yaml). timeout=90: the first add_object rebuilds and
+  # re-warms the solvers (see test_object.yaml).
+  - name: "08 add a cuboid"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    timeout: 90.0
+    data:
+      type: 0
+      name: "table"
+      pose:
+        position: {x: 1.5, y: 0.0, z: 0.2}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 0.4, y: 0.4, z: 0.4}
+      color: {r: 0.5, g: 0.5, b: 0.5, a: 1.0}
+    expect: {success: True}
+
+  - name: "09 add a part read from USD"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    timeout: 90.0
+    data:
+      type: 5
+      name: "part"
+      mesh_file_path: "/home/ros2_ws/src/curobo_ros/config/config_test/cube_55mm.usda"
+      pose:
+        position: {x: 1.5, y: 0.0, z: 0.43}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 1.0, y: 1.0, z: 1.0}
+      color: {r: 1.0, g: 0.8, b: 0.0, a: 1.0}
+    expect:
+      success: True
+      message: "Object 'part' added (1 cuboids, 1 meshes)"
+
+  - name: "10 switch the part off"
+    service: "/unified_planner/set_obstacle_collision"
+    type: curobo_msgs/srv/SetLinkCollision
+    data:
+      link_names: ["part"]
+      enabled: False
+    expect: {success: True, applied_links: {$len: 1}, unknown_links: {$len: 0}}
+
+  - name: "11 an unknown obstacle is reported"
+    service: "/unified_planner/set_obstacle_collision"
+    type: curobo_msgs/srv/SetLinkCollision
+    data:
+      link_names: ["no_such_obstacle"]
+      enabled: False
+    expect: {success: False, unknown_links: {$len: 1}}
+
+  - name: "12 switch the part back on"
+    service: "/unified_planner/set_obstacle_collision"
+    type: curobo_msgs/srv/SetLinkCollision
+    data:
+      link_names: ["part"]
+      enabled: True
+    expect: {success: True, applied_links: {$len: 1}}

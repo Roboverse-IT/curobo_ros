@@ -122,6 +122,16 @@ class RosServiceManager:
             self.robot_model_manager.set_link_collision_callback
         )
 
+        # Service to switch scene obstacles off/on by name: the request of
+        # set_link_collision, for obstacles instead of robot links. The obstacle
+        # stays in the scene (unlike remove_object) and the state persists until
+        # the opposite call, across world updates.
+        self.set_obstacle_collision_srv = self.node.create_service(
+            SetLinkCollision,
+            self.node.get_name() + '/set_obstacle_collision',
+            partial(self._callback_set_obstacle_collision, self.node)
+        )
+
         # Service to enable/disable collision sphere publishing (disabled by default)
         self.set_collision_spheres_srv = self.node.create_service(
             SetBool,
@@ -308,6 +318,31 @@ class RosServiceManager:
     def _callback_get_robot_strategies(self, node, request: GetRobotStrategies.Request, response: GetRobotStrategies.Response):
         """Delegate get_robot_strategies service to RobotContext"""
         return self.robot_context.get_robot_strategies_callback(node, request, response)
+
+    def _callback_set_obstacle_collision(self, node, request, response):
+        """Obstacles off/on by name; same response semantics as set_link_collision."""
+        known, unknown = self.obstacle_manager.set_obstacles_enabled(
+            list(request.link_names), request.enabled)
+        failed = node.apply_obstacle_states(known) if hasattr(node, 'apply_obstacle_states') else []
+        applied = [n for n in known if n not in failed]
+        response.applied_links = applied
+        response.unknown_links = unknown
+        state = "enabled" if request.enabled else "disabled"
+        if unknown:
+            node.get_logger().warn(
+                f"set_obstacle_collision: unknown obstacles {unknown}. "
+                f"Available: {list(self.obstacle_manager.obstacle_names)}")
+        if applied and not failed:
+            node.get_logger().info(f"Obstacles {state}: {applied}")
+            response.success = True
+            response.message = f"Obstacles {state}: {applied}"
+        elif failed:
+            response.success = False
+            response.message = f"Could not set {failed} in every solver (see the node log)"
+        else:
+            response.success = False
+            response.message = f"No known obstacles in: {list(request.link_names)}"
+        return response
 
     def _callback_set_collision_spheres_enabled(self, request: SetBool.Request, response: SetBool.Response):
         """Enable or disable collision sphere publishing (e.g. disable during MPC graph capture)"""

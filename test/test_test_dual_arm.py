@@ -27,6 +27,8 @@ from curobo_msgs.srv import Fk
 from curobo_msgs.srv import WarmupIK
 from curobo_msgs.srv import IkBatch
 from curobo_msgs.srv import TrajectoryGeneration
+from curobo_msgs.srv import AddObject
+from curobo_msgs.srv import SetLinkCollision
 
 @launch_testing.ready_to_test_action_timeout(90.0)
 @pytest.mark.launch_test
@@ -359,6 +361,211 @@ class GeneratedTestSuite(unittest.TestCase):
         self.assertTrue(
             response.message.startswith("Planning error: target_tool_frames"),
             f"Field 'message' value {{  response.message  }} doesn't match pattern 'Planning error: target_tool_frames%'"
+        )
+
+    def test_08_add_a_cuboid(self):
+        """08 add a cuboid"""
+
+        # Create service client
+        client = self.node.create_client(AddObject, '/unified_planner/add_object')
+
+        # Wait for service to be available
+        timeout = 90.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/add_object' not available after {timeout}s")
+
+        # Create request
+        request = AddObject.Request()
+        set_message_fields(request, {'type': 0, 'name': 'table', 'pose': {'position': {'x': 1.5, 'y': 0.0, 'z': 0.2}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'dimensions': {'x': 0.4, 'y': 0.4, 'z': 0.4}, 'color': {'r': 0.5, 'g': 0.5, 'b': 0.5, 'a': 1.0}})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/add_object' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/add_object' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+    def test_09_add_a_part_read_from_usd(self):
+        """09 add a part read from USD"""
+
+        # Create service client
+        client = self.node.create_client(AddObject, '/unified_planner/add_object')
+
+        # Wait for service to be available
+        timeout = 90.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/add_object' not available after {timeout}s")
+
+        # Create request
+        request = AddObject.Request()
+        set_message_fields(request, {'type': 5, 'name': 'part', 'mesh_file_path': '/home/ros2_ws/src/curobo_ros/config/config_test/cube_55mm.usda', 'pose': {'position': {'x': 1.5, 'y': 0.0, 'z': 0.43}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'dimensions': {'x': 1.0, 'y': 1.0, 'z': 1.0}, 'color': {'r': 1.0, 'g': 0.8, 'b': 0.0, 'a': 1.0}})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/add_object' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/add_object' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.message,
+            "Object 'part' added (1 cuboids, 1 meshes)",
+            f"Field 'message' doesn't match expected value"
+        )
+
+    def test_10_switch_the_part_off(self):
+        """10 switch the part off"""
+
+        # Create service client
+        client = self.node.create_client(SetLinkCollision, '/unified_planner/set_obstacle_collision')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/set_obstacle_collision' not available after {timeout}s")
+
+        # Create request
+        request = SetLinkCollision.Request()
+        set_message_fields(request, {'link_names': ['part'], 'enabled': False})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/set_obstacle_collision' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/set_obstacle_collision' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            len(list(response.applied_links)),
+            1,
+            f"Field 'applied_links' length doesn't match expected 1"
+        )
+
+        self.assertEqual(
+            len(list(response.unknown_links)),
+            0,
+            f"Field 'unknown_links' length doesn't match expected 0"
+        )
+
+    def test_11_an_unknown_obstacle_is_reported(self):
+        """11 an unknown obstacle is reported"""
+
+        # Create service client
+        client = self.node.create_client(SetLinkCollision, '/unified_planner/set_obstacle_collision')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/set_obstacle_collision' not available after {timeout}s")
+
+        # Create request
+        request = SetLinkCollision.Request()
+        set_message_fields(request, {'link_names': ['no_such_obstacle'], 'enabled': False})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/set_obstacle_collision' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/set_obstacle_collision' failed")
+
+
+        self.assertEqual(
+            response.success,
+            False,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            len(list(response.unknown_links)),
+            1,
+            f"Field 'unknown_links' length doesn't match expected 1"
+        )
+
+    def test_12_switch_the_part_back_on(self):
+        """12 switch the part back on"""
+
+        # Create service client
+        client = self.node.create_client(SetLinkCollision, '/unified_planner/set_obstacle_collision')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/set_obstacle_collision' not available after {timeout}s")
+
+        # Create request
+        request = SetLinkCollision.Request()
+        set_message_fields(request, {'link_names': ['part'], 'enabled': True})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/set_obstacle_collision' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/set_obstacle_collision' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            len(list(response.applied_links)),
+            1,
+            f"Field 'applied_links' length doesn't match expected 1"
         )
 
 @launch_testing.post_shutdown_test()

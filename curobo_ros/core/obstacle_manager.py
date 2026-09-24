@@ -39,6 +39,15 @@ class ObstacleManager:
         # Tracks registered obstacle names for uniqueness validation.
         self.obstacle_names = []
 
+        # Obstacles switched off by name (set_obstacle_collision). They stay in
+        # the scene; the node re-applies this set to every solver after each
+        # world update, which would otherwise switch everything back on.
+        self.disabled_obstacles = set()
+
+        # USD obstacles as read, before the SDF padding (scene_sanitizer): the
+        # padding is for the world, not for a payload fitted from the geometry.
+        self.unpadded_meshes = {}
+
         # Perception (created lazily in setup_perception()).
         self.mapper = None
         self._esdf_voxel_name = None
@@ -453,6 +462,16 @@ class ObstacleManager:
                         f"(handled natively by Mapper TSDF in v2)"
                     )
 
+                case request.USD:
+                    if not os.path.exists(request.mesh_file_path):
+                        response.success = False
+                        response.message = f'USD file not found: {request.mesh_file_path}'
+                        return response
+                    mesh, padded = self._mesh_from_usd(
+                        request.name, request.mesh_file_path, pose, dims, color)
+                    self._append('mesh', padded)
+                    self.unpadded_meshes[request.name] = mesh
+
                 case _:
                     response.success = False
                     response.message = f'Object type "{request.type}" not recognized'
@@ -472,6 +491,63 @@ class ObstacleManager:
         self._notify_world_changed()
         return response
 
+    def _mesh_from_usd(self, name, path, pose, scale, color):
+        """The first mesh prim of a USD file, as an obstacle. Returns
+        (mesh as read, mesh padded for cuRobo's SDF kernel).
+
+        ``pose`` places the file's root in the world, so the prim's own pose in
+        the file is composed after it; ``scale`` scales the vertices. A mesh
+        smaller than the robot's largest collision sphere would read as in
+        collision everywhere (see scene_sanitizer): its bounding box is widened
+        with vertices no face uses, the surface is unchanged.
+        """
+        from curobo._src.util.usd_scene_parser import UsdSceneParser
+        from scipy.spatial.transform import Rotation
+        from curobo_ros.core.scene_sanitizer import half_diagonal, pad_mesh
+
+        parser = UsdSceneParser()
+        parser.load_stage_from_file(path)
+        found = parser.get_obstacles_from_stage(
+            ignore_substring=["Light", "Camera", "Looks", "Render"]).mesh
+        if not found:
+            raise ValueError(f"no mesh prim in {path}")
+        prim = found[0]
+
+        # world = pose * prim pose; poses are [x, y, z, qw, qx, qy, qz]
+        rot = Rotation.from_quat([pose[4], pose[5], pose[6], pose[3]])
+        prim_rot = Rotation.from_quat(
+            [prim.pose[4], prim.pose[5], prim.pose[6], prim.pose[3]])
+        position = np.asarray(pose[:3]) + rot.apply(np.asarray(prim.pose[:3]))
+        qx, qy, qz, qw = (rot * prim_rot).as_quat()
+
+        vertices = np.asarray(prim.vertices, dtype=np.float64) * np.asarray(scale)
+        mesh = Mesh(
+            name=name, pose=[*position.tolist(), qw, qx, qy, qz],
+            vertices=vertices.tolist(), faces=np.asarray(prim.faces).tolist(),
+            color=color,
+        )
+        threshold = self._max_robot_sphere_radius() + 0.05
+        padded = pad_mesh(mesh, threshold) if half_diagonal(mesh) < threshold else mesh
+        return mesh, padded
+
+    def _max_robot_sphere_radius(self) -> float:
+        kin = getattr(getattr(self.node, 'config_wrapper_motion', None), 'kin_model', None)
+        if kin is None:
+            raise RuntimeError("robot kinematics not ready: cannot size a USD obstacle")
+        return float(kin.robot_spheres[..., 3].max())
+
+    def set_obstacles_enabled(self, names, enabled):
+        """Record obstacles as on/off by name. Returns (known, unknown); the
+        node applies the state to the solvers (apply_obstacle_states)."""
+        known = [n for n in names if n in self.obstacle_names]
+        unknown = [n for n in names if n not in self.obstacle_names]
+        for n in known:
+            if enabled:
+                self.disabled_obstacles.discard(n)
+            else:
+                self.disabled_obstacles.add(n)
+        return known, unknown
+
     def remove_object(self, node, request: RemoveObject, response):
         if request.name not in self.obstacle_names:
             response.success = False
@@ -484,6 +560,8 @@ class ObstacleManager:
                 if obs.name == request.name:
                     items.pop(i)
                     self.obstacle_names.remove(request.name)
+                    self.disabled_obstacles.discard(request.name)
+                    self.unpadded_meshes.pop(request.name, None)
                     response.success = True
                     response.message = f"Object '{request.name}' removed from {bucket}s"
                     node.get_logger().info(response.message)
@@ -501,6 +579,8 @@ class ObstacleManager:
         for bucket in ('cuboid', 'capsule', 'cylinder', 'sphere', 'mesh'):
             setattr(self.scene, bucket, [])
         self.obstacle_names = []
+        self.disabled_obstacles.clear()
+        self.unpadded_meshes.clear()
 
         response.success = True
         response.message = f'All {total} obstacles removed'

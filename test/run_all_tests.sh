@@ -55,7 +55,7 @@ fi
 echo ""
 
 echo "Running test_test_dual_arm..."
-if timeout 530 launch_test "${TEST_DIR}/test_test_dual_arm.py" > /dev/null 2>&1; then
+if timeout 740 launch_test "${TEST_DIR}/test_test_dual_arm.py" > /dev/null 2>&1; then
     echo "  ✓ test_test_dual_arm PASSED"
     ((PASSED_TESTS++)) || true
 else

@@ -406,6 +406,45 @@ class UnifiedPlannerNode(Node):
 
         self.ik_services.update_world()
 
+        # update_world reloads every obstacle switched on: switch the ones
+        # recorded as off back off (no-op when there are none).
+        self.apply_obstacle_states()
+
+    def _scene_collision_checkers(self):
+        """The scene collision checker of every solver that exists."""
+        # getattr throughout: this also runs while the node is still being
+        # built (the first planner warmup), before every solver attribute exists.
+        solvers = (
+            ('motion_planner', getattr(self, 'motion_planner', None)),
+            ('ik_services', getattr(getattr(self, 'ik_services', None), '_ik_solver', None)),
+            ('mpc', getattr(self, 'mpc', None)),
+        )
+        return [(label, s.scene_collision_checker) for label, s in solvers
+                if s is not None and getattr(s, 'scene_collision_checker', None) is not None]
+
+    def apply_obstacle_states(self, names=None):
+        """Apply the obstacles' on/off state to every solver. ``names`` None ->
+        only the obstacles recorded as off. Returns the names some solver
+        refused (e.g. a mesh without apply_curobo_patches: see curobo_patches)."""
+        obstacle_manager = getattr(
+            getattr(self, 'config_wrapper_motion', None), 'obstacle_manager', None)
+        if obstacle_manager is None:
+            return []
+        disabled = obstacle_manager.disabled_obstacles
+        names = list(disabled) if names is None else list(names)
+        if not names:
+            return []
+        failed = []
+        for name in names:
+            for label, checker in self._scene_collision_checkers():
+                try:
+                    checker.enable_obstacle(name, name not in disabled)
+                except Exception as e:
+                    self.get_logger().error(f"obstacle '{name}' in {label}: {e}")
+                    if name not in failed:
+                        failed.append(name)
+        return failed
+
     def refresh_perception_world(self):
         """Recompute the perception ESDF and push it to all solvers.
 
