@@ -28,6 +28,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallb
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+from rcl_interfaces.msg import ParameterDescriptor
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_srvs.srv import Trigger
 from curobo_msgs.srv import TrajectoryGeneration, SetPlanner, GetPlanners
@@ -173,6 +174,16 @@ class UnifiedPlannerNode(Node):
         # Adopt the canonical joint order/DOF into the RobotContext descriptor now
         # that the kinematics exist (RobotContext is built before the kin model).
         self.robot_context.bind_kinematics(self.config_wrapper_motion.kin_model)
+
+        # The robot as the planner sees it, for clients that plan for it: the
+        # joint order of every configuration going in or out (start_pose,
+        # target_joint_positions, trajectories) and the tool frames a
+        # multi-frame goal names. Read-only: they describe the loaded model.
+        kin = self.config_wrapper_motion.kin_model
+        self.declare_parameter(
+            'joint_names', list(kin.joint_names), ParameterDescriptor(read_only=True))
+        self.declare_parameter(
+            'tool_frames', list(kin.tool_frames), ParameterDescriptor(read_only=True))
 
         # Shared Scene for all planners — references ObstacleManager's Scene.
         # All planners see the same obstacles after update_world(scene).
