@@ -29,6 +29,7 @@ from curobo_msgs.srv import IkBatch
 from curobo_msgs.srv import TrajectoryGeneration
 from curobo_msgs.srv import AddObject
 from curobo_msgs.srv import SetLinkCollision
+from curobo_msgs.srv import GetCollisionDistance
 
 @launch_testing.ready_to_test_action_timeout(90.0)
 @pytest.mark.launch_test
@@ -566,6 +567,53 @@ class GeneratedTestSuite(unittest.TestCase):
             len(list(response.applied_links)),
             1,
             f"Field 'applied_links' length doesn't match expected 1"
+        )
+
+    def test_13_collision_along_a_trajectory(self):
+        """13 collision along a trajectory"""
+
+        # Create service client
+        client = self.node.create_client(GetCollisionDistance, '/unified_planner/get_collision_distance')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/get_collision_distance' not available after {timeout}s")
+
+        # Create request
+        request = GetCollisionDistance.Request()
+        set_message_fields(request, {'trajectory': [{'position': [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]}, {'position': [-1.57, -2.0, 1.7, -1.383, -1.57, 0.0, 1.57, -0.43, -2.1, -1.7, 1.57, 0.0]}, {'position': [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]}]})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/get_collision_distance' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/get_collision_distance' failed")
+
+
+        self.assertEqual(
+            response.nb_config,
+            3,
+            f"Field 'nb_config' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.nb_sphere,
+            40,
+            f"Field 'nb_sphere' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            len(list(response.data)),
+            120,
+            f"Field 'data' length doesn't match expected 120"
         )
 
 @launch_testing.post_shutdown_test()

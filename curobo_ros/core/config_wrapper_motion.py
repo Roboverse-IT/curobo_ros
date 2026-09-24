@@ -161,6 +161,8 @@ class ConfigWrapperMotion(ConfigWrapper):
         )
 
     def callback_get_collision_distance(self, node, request: GetCollisionDistance, response):
+        if request.trajectory:
+            return _trajectory_sphere_distance(self, node, response, list(request.trajectory))
         return _compute_sphere_distance(self, node, response)
 
 
@@ -224,5 +226,63 @@ def _compute_sphere_distance(wrapper, node, response):
     )
     sphere_dist_ar = torch.flatten(sphere_dist, start_dim=0).tolist()
     response.nb_sphere = len(sphere_dist_ar)
+    response.nb_config = 1
     response.data = sphere_dist_ar
+    return response
+
+
+def _trajectory_sphere_distance(wrapper, node, response, trajectory):
+    """The same quantity as _compute_sphere_distance, for every configuration
+    of ``trajectory`` (GetCollisionDistance.trajectory), config-major.
+
+    Evaluated with the MotionPlanner's kinematics when it exists: that model
+    carries the attached payloads (the robot_model_manager one does not), and a
+    planned motion is checked with what the robot is holding. The value is
+    cuRobo's collision cost with activation distance d (the node's
+    collision_activation_distance): 0 while farther than d from any obstacle;
+    a sphere penetrates by (value - d/2) once value exceeds d/2.
+    """
+    def empty():
+        response.nb_sphere = 0
+        response.nb_config = 0
+        response.data = []
+        return response
+
+    solver = getattr(node, 'motion_planner', None) or getattr(node, 'mpc', None)
+    checker = getattr(solver, 'scene_collision_checker', None) if solver is not None else None
+    if checker is None or not hasattr(checker, 'get_sphere_distance'):
+        return empty()
+    kin = getattr(getattr(node, 'motion_planner', None), 'kinematics', None) or wrapper.kin_model
+    names = list(kin.joint_names)
+    positions = [list(js.position) for js in trajectory]
+    if any(len(q) != len(names) for q in positions):
+        node.get_logger().error(
+            f"get_collision_distance: each configuration needs {len(names)} positions, "
+            f"in the order of the joint_names parameter")
+        return empty()
+
+    q_js = JointState.from_position(
+        torch.tensor(positions, dtype=wrapper._ops_dtype, device=wrapper._device),
+        joint_names=names)
+    kinematics_state = kin.compute_kinematics(q_js)
+
+    if node.has_parameter('collision_activation_distance'):
+        activation_distance = node.get_parameter(
+            'collision_activation_distance'
+        ).get_parameter_value().double_value
+    else:
+        activation_distance = 0.025
+
+    device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
+    collision_buffer = CollisionBuffer.from_shape(kinematics_state.robot_spheres.shape, device_cfg)
+    sphere_dist = checker.get_sphere_distance(
+        kinematics_state,
+        collision_buffer,
+        device_cfg.to_device([1.0]),
+        activation_distance=device_cfg.to_device([activation_distance]),
+    )
+    per_config = sphere_dist.reshape(len(positions), -1)
+    response.nb_config = len(positions)
+    response.nb_sphere = int(per_config.shape[1])
+    response.data = per_config.flatten().tolist()
     return response

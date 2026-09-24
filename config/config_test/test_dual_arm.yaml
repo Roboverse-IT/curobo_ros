@@ -157,3 +157,15 @@ tests:
       link_names: ["part"]
       enabled: True
     expect: {success: True, applied_links: {$len: 1}}
+
+  # --- Collision along a trajectory: one row of values per configuration.
+  # dual_ur10e has 40 collision spheres: 3 configurations -> 120 values.
+  - name: "13 collision along a trajectory"
+    service: "/unified_planner/get_collision_distance"
+    type: curobo_msgs/srv/GetCollisionDistance
+    data:
+      trajectory:
+        - position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+        - position: [-1.57, -2.0, 1.7, -1.383, -1.57, 0.0, 1.57, -0.43, -2.1, -1.7, 1.57, 0.0]
+        - position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+    expect: {nb_config: 3, nb_sphere: 40, data: {$len: 120}}

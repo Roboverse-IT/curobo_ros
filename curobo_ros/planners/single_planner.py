@@ -266,6 +266,18 @@ class SinglePlanner(TrajectoryPlanner):
             # Get interpolated trajectory
             self.planned_trajectory = result.get_interpolated_plan()
 
+            # A robot with locked joints (lock_joints in its cuRobo config) gets
+            # them in the interpolated plan too, after the planned ones: e.g. 17
+            # names for 14 planned joints on a dual-arm robot with a locked
+            # lifting column and gripper knuckles. Everything downstream (the
+            # service response, set_command, the command strategies) reads the
+            # planned joints, by position: keep only those. A robot without
+            # locked joints never takes this branch.
+            kin = self.motion_planner.kinematics
+            names = getattr(self.planned_trajectory, 'joint_names', None)
+            if names is not None and len(names) > kin.get_dof():
+                self.planned_trajectory = kin.get_active_js(self.planned_trajectory)
+
             # Allow child class to post-process the trajectory
             # (e.g., add grasp commands, modify velocities, etc.)
             self.planned_trajectory = self._process_trajectory(
