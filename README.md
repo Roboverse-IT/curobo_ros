@@ -20,6 +20,7 @@ GPU-accelerated motion planning for **ROS 2** — powered by [cuRobo](https://cu
 - **Robot backends as strategies** — emulator, velocity streaming, or position streaming to a real robot, switchable at runtime; bring your own robot with a YAML descriptor
 - **Obstacle management** — primitives and meshes, object attachment to the flange, per-link collision toggling, collision distance queries, voxel grid introspection
 - **Batch IK/FK services** — GPU-parallel kinematics with collision-aware IK
+- **Several tool frames (dual-arm)** — one trajectory for every tool frame of the robot (`target_tool_frames`), multi-frame FK and IK, obstacles read from USD and switched off/on by name, one attach link per arm; robots described by a cuRobo YAML, an XRDF, or cuRobo's bundled robots by name
 - **Test suite** — auto-generated integration tests covering planning, collisions, kinematics, and planner switching
 
 ## Quick start
@@ -32,6 +33,8 @@ vcs import < curobo_ros/my.repos           # pulls curobo_msgs + curobo_rviz
 # build the Docker image for your platform (x86 or Jetson), then inside it:
 colcon build && source install/setup.bash
 ros2 launch curobo_ros gen_traj.launch.py robot:=emulator
+# a dual-arm robot: cuRobo's stock dual UR10e, two tool frames
+ros2 launch curobo_ros gen_traj.launch.py robot:=dual_ur10e
 ```
 
 ## Documentation
