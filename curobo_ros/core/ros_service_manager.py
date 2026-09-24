@@ -209,7 +209,7 @@ class RosServiceManager:
         """
         scene = self.obstacle_manager.get_scene()
         attach_svc = getattr(node, 'attachment_services', None)
-        attached_name = attach_svc.attached_name if attach_svc is not None else None
+        attached_names = attach_svc.attached_names if attach_svc is not None else set()
 
         marker_array = MarkerArray()
         clear = Marker()
@@ -248,7 +248,7 @@ class RosServiceManager:
                     d = 2.0 * float(getattr(obs, 'radius', 0.05))
                     m.scale.x = m.scale.y = d
                     m.scale.z = float(getattr(obs, 'height', d))
-                if attached_name is not None and getattr(obs, 'name', None) == attached_name:
+                if getattr(obs, 'name', None) in attached_names:
                     # attached → disabled world obstacle: grey, translucent
                     m.color.r, m.color.g, m.color.b, m.color.a = 0.5, 0.5, 0.5, 0.35
                 else:

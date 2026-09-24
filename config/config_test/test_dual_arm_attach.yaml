@@ -1,0 +1,107 @@
+# Per-arm attach on robots/dual_ur10e_attach.yaml: cuRobo's dual UR10e with one
+# attach link per arm. Two parts read from USD, one held by each arm at the same
+# time, then released link by link. The parts are named scene obstacles
+# (AttachObject.object_name); the fit and the sphere count are chosen per call.
+
+package: curobo_ros
+environment:
+  launch:
+    - package: curobo_ros
+      executable: gen_traj_test_dual_arm_attach.launch.py
+      name: gen_traj_dual_arm_attach
+  # Same readiness probe as the other suites (see test_collision.yaml).
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+
+tests:
+  # A cuboid first, so a cuboid store exists: attaching a MESH needs
+  # apply_curobo_patches then (on in the descriptor). timeout=90: the first
+  # add_object and the first attach rebuild / warm up (see test_object.yaml).
+  - name: "01 add a cuboid"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    timeout: 90.0
+    data:
+      type: 0
+      name: "table"
+      pose:
+        position: {x: 1.5, y: 0.0, z: 0.2}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 0.4, y: 0.4, z: 0.4}
+      color: {r: 0.5, g: 0.5, b: 0.5, a: 1.0}
+    expect: {success: True}
+
+  - name: "02 add the part for arm 1"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    timeout: 90.0
+    data:
+      type: 5
+      name: "part_1"
+      mesh_file_path: "/home/ros2_ws/src/curobo_ros/config/config_test/cube_55mm.usda"
+      pose:
+        position: {x: 1.4, y: 0.1, z: 0.43}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 1.0, y: 1.0, z: 1.0}
+      color: {r: 1.0, g: 0.8, b: 0.0, a: 1.0}
+    expect: {success: True}
+
+  - name: "03 add the part for arm 0"
+    service: "/unified_planner/add_object"
+    type: curobo_msgs/srv/AddObject
+    timeout: 90.0
+    data:
+      type: 5
+      name: "part_0"
+      mesh_file_path: "/home/ros2_ws/src/curobo_ros/config/config_test/cube_55mm.usda"
+      pose:
+        position: {x: 1.4, y: -0.1, z: 0.43}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 1.0, y: 1.0, z: 1.0}
+      color: {r: 1.0, g: 0.8, b: 0.0, a: 1.0}
+    expect: {success: True}
+
+  - name: "04 arm 1 holds part_1 (surface fit, 4 spheres)"
+    service: "/unified_planner/attach_object"
+    type: curobo_msgs/srv/AttachObject
+    timeout: 90.0
+    data:
+      object_name: "part_1"
+      attach_link: "attached_object_1"
+      sphere_fit_type: 1
+      num_spheres: 4
+    expect: {success: True, message: "Attached 'part_1'"}
+
+  - name: "05 arm 0 holds part_0 at the same time (voxel fit, estimated count)"
+    service: "/unified_planner/attach_object"
+    type: curobo_msgs/srv/AttachObject
+    timeout: 90.0
+    data:
+      object_name: "part_0"
+      attach_link: "attached_object_0"
+      sphere_fit_type: 2
+    expect: {success: True, message: "Attached 'part_0'"}
+
+  - name: "06 release arm 1"
+    service: "/unified_planner/detach_link"
+    type: curobo_msgs/srv/RemoveObject
+    data:
+      name: "attached_object_1"
+    expect: {success: True, message: "Detached 'part_1' from 'attached_object_1'"}
+
+  - name: "07 release arm 0"
+    service: "/unified_planner/detach_link"
+    type: curobo_msgs/srv/RemoveObject
+    data:
+      name: "attached_object_0"
+    expect: {success: True, message: "Detached 'part_0' from 'attached_object_0'"}
+
+  - name: "08 a link the robot does not have is refused"
+    service: "/unified_planner/detach_link"
+    type: curobo_msgs/srv/RemoveObject
+    data:
+      name: "no_such_link"
+    expect: {success: False, message: "Detach error: %"}

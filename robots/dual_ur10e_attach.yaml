@@ -1,0 +1,14 @@
+# Robot descriptor -- cuRobo's dual UR10e with one attach link per arm
+# (config/dual_ur10e_attach.yml: attached_object_1 on tool1, attached_object_0 on
+# tool0). apply_curobo_patches: a mesh obstacle can be disabled, which attaching
+# it relies on. Emulator strategy: no hardware. Used by
+# config/config_test/test_dual_arm_attach.yaml.
+name: dual_ur10e_attach
+display_name: "Dual UR10e, one attach link per arm (emulator)"
+
+curobo_config: package://curobo_ros/config/dual_ur10e_attach.yml
+apply_curobo_patches: true
+
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states
