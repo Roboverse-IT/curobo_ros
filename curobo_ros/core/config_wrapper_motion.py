@@ -60,7 +60,9 @@ class ConfigWrapperMotion(ConfigWrapper):
         self.orientation_tolerance = 0.05
         self.max_batch_size = 1
         self.multi_env = False
-        self.max_goalset = 1
+        # The node's max_goalset parameter (plan_grasp's candidates); 1 without it.
+        self.max_goalset = (int(node.get_parameter('max_goalset').value)
+                            if node.has_parameter('max_goalset') else 1)
 
         self.motion_gen_srv = node.create_service(
             Trigger,

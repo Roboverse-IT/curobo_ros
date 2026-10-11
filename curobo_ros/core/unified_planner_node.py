@@ -32,7 +32,7 @@ from rcl_interfaces.msg import ParameterDescriptor
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_srvs.srv import Trigger
 from curobo_msgs.srv import TrajectoryGeneration, SetPlanner, GetPlanners
-from curobo_msgs.action import SendTrajectory
+from curobo_msgs.action import GraspPlan, SendTrajectory
 
 from curobo.types import DeviceCfg, JointState
 
@@ -41,6 +41,8 @@ from curobo_ros.core.config_wrapper_motion import ConfigWrapperMotion
 from curobo_ros.core.attachment_services import AttachmentServices
 from curobo_ros.core.ik_services import IKServices
 from curobo_ros.core.fk_services import FKServices
+from curobo_ros.core.time_dilation import check_factor, dilate
+from curobo_ros.planners.grasp_planner import GraspPlanner
 from curobo_ros.planners import (
     PlannerFactory,
     PlannerManager,
@@ -166,6 +168,15 @@ class UnifiedPlannerNode(Node):
         # Lifetime (s) of a pre-planned (preview) trajectory cached by
         # generate_trajectory and reused by the execute action.
         self.declare_parameter('trajectory_cache_ttl', 30.0)
+        # Goal-set size the MotionPlanner is built for: plan_grasp needs at least
+        # the number of grasp candidates it is given. 1 keeps today's planner.
+        self.declare_parameter('max_goalset', 1)
+        # plan_grasp leg checks (planners/grasp_planner.py): how far a leg may end
+        # from its pose, and stray from its line, before the grasp is re-planned.
+        self.declare_parameter('grasp_max_attempts', 3)
+        self.declare_parameter('grasp_position_tolerance', 0.005)
+        self.declare_parameter('grasp_orientation_tolerance', 0.05)
+        self.declare_parameter('grasp_line_tolerance', 0.005)
 
         # Single shared context for every solver (robot + obstacles + scene +
         # collision cache). The MPC solver is built lazily from this same context.
@@ -223,6 +234,9 @@ class UnifiedPlannerNode(Node):
         # Cached open-loop plan from a generate_trajectory (preview) call, reused
         # by the execute action when its target matches. See _pending_plan_*.
         self._pending_plan = None  # {'planner': key, 'signature': sig, 'stamp': monotonic}
+
+        # cuRobo's grasp pipeline on the shared MotionPlanner (plan_grasp action).
+        self.grasp_planner = GraspPlanner(self, self.config_wrapper_motion)
 
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_motion)
@@ -283,6 +297,17 @@ class UnifiedPlannerNode(Node):
             goal_callback=self.goal_callback,
             cancel_callback=self.cancel_callback,
             callback_group=ReentrantCallbackGroup(),
+        )
+
+        # Grasp pipeline: goalset -> approach -> grasp -> lift, planned (and with
+        # execute, run) in one goal. Its own group: it plans on the shared
+        # MotionPlanner under gpu_lock, like generate_trajectory.
+        self._grasp_action_server = ActionServer(
+            self,
+            GraspPlan,
+            f'{self.get_name()}/plan_grasp',
+            execute_callback=self.grasp_callback,
+            callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
         from geometry_msgs.msg import Pose as PoseMsg
@@ -568,6 +593,7 @@ class UnifiedPlannerNode(Node):
                 response.message = "No planner selected"
                 return response
 
+            check_factor(request.time_dilation_factor)
             _, start_state = self._resolve_start_state(request)
 
             config = self._get_planner_config(planner)
@@ -637,6 +663,7 @@ class UnifiedPlannerNode(Node):
                         waypoint.velocity = vel_list[i]
                     trajectory_msgs.append(waypoint)
                 response.trajectory = trajectory_msgs
+                response.dt = dilate(trajectory_msgs, response.dt, request.time_dilation_factor)
 
                 self.get_logger().info(
                     f"Planning succeeded: {result.message} "
@@ -747,6 +774,55 @@ class UnifiedPlannerNode(Node):
             if goal_handle.is_active:
                 goal_handle.abort()
             return result_msg
+
+    def grasp_callback(self, goal_handle):
+        """Plan cuRobo's grasp pipeline; with ``execute``, run it on the robot."""
+        goal = goal_handle.request
+        result_msg = GraspPlan.Result()
+        claimed = False
+        try:
+            if goal.execute and goal.time_dilation_factor not in (0.0, 1.0):
+                raise ValueError(
+                    "time_dilation_factor applies to planned legs only: use execute false")
+            if goal.execute:
+                with self._goal_lock:
+                    if self._goal_active:
+                        raise RuntimeError("another goal is executing")
+                    self._goal_active = claimed = True
+            self.get_logger().info(
+                f"Planning grasp ({len(goal.grasp_candidates)} candidate(s))")
+            with self.gpu_lock:
+                self._ensure_exclusive_graph_key('motion')
+                if self.motion_planner is None:
+                    self._warmup_classic()
+                _, start_state = self._resolve_start_state(goal)
+                self.refresh_perception_world()
+                legs, goal_index, message = self.grasp_planner.plan(start_state, goal)
+            result_msg.message = message
+            if legs is None:
+                self.get_logger().error(message)
+                goal_handle.abort()
+                return result_msg
+            self.grasp_planner.fill_result(result_msg, legs, goal_index, goal)
+            if goal.execute and not self.grasp_planner.execute(
+                    self.robot_context, legs, goal, goal_handle):
+                result_msg.message = "Grasp execution failed or was canceled"
+                goal_handle.abort()
+                return result_msg
+            result_msg.success = True
+            self.get_logger().info(message)
+            goal_handle.succeed()
+        except Exception as e:
+            result_msg.success = False
+            result_msg.message = f"Grasp error: {e}"
+            self.get_logger().error(result_msg.message)
+            self.get_logger().error(traceback.format_exc())
+            goal_handle.abort()
+        finally:
+            if claimed:
+                with self._goal_lock:
+                    self._goal_active = False
+        return result_msg
 
     def set_planner_callback(self, request: SetPlanner.Request, response: SetPlanner.Response):
         try:
