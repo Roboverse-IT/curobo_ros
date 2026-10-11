@@ -26,6 +26,13 @@ class JointSpacePlanner(SinglePlanner):
     def get_planner_name(self) -> str:
         return "Joint Space Motion Generation"
 
+    @property
+    def motion_planner(self):
+        """The node's joint-space MotionPlanner when it has one
+        (joint_space_own_planner), else the shared one."""
+        own = getattr(self.node, 'joint_space_motion_planner', None)
+        return own if own is not None else self._shared_motion_planner
+
     def _plan_trajectory(
         self,
         start_state: JointState,

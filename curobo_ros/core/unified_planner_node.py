@@ -171,6 +171,9 @@ class UnifiedPlannerNode(Node):
         # Goal-set size the MotionPlanner is built for: plan_grasp needs at least
         # the number of grasp candidates it is given. 1 keeps today's planner.
         self.declare_parameter('max_goalset', 1)
+        # Joint-space plans on their own MotionPlanner (see
+        # ConfigWrapperMotion.set_motion_gen_config). Costs a second solver set.
+        self.declare_parameter('joint_space_own_planner', False)
         # plan_grasp leg checks (planners/grasp_planner.py): how far a leg may end
         # from its pose, and stray from its line, before the grasp is re-planned.
         self.declare_parameter('grasp_max_attempts', 3)
@@ -202,6 +205,7 @@ class UnifiedPlannerNode(Node):
 
         # Solvers (created on demand).
         self.motion_planner = None  # v2 alias
+        self.joint_space_motion_planner = None  # with joint_space_own_planner
         self.motion_gen = None      # legacy alias, kept for older code paths
         self.mpc = None             # reactive: ModelPredictiveControl
         self.retargeter = None      # reactive: MotionRetargeter (teleop)
@@ -419,8 +423,9 @@ class UnifiedPlannerNode(Node):
                 "solvers see analytic primitives ONLY, no camera obstacles",
                 throttle_duration_sec=5.0)
 
-        if self.motion_planner is not None:
-            self.motion_planner.update_world(scene)
+        for planner in (self.motion_planner, self.joint_space_motion_planner):
+            if planner is not None:
+                planner.update_world(scene)
 
         # Reactive controllers each own their collision model; delegate to the
         # controller's update_world() override (no node dependency on internals).
@@ -449,6 +454,7 @@ class UnifiedPlannerNode(Node):
         retargeter = getattr(self, 'retargeter', None)
         solvers = (
             ('motion_planner', getattr(self, 'motion_planner', None)),
+            ('joint_space_planner', getattr(self, 'joint_space_motion_planner', None)),
             ('ik_services', getattr(getattr(self, 'ik_services', None), '_ik_solver', None)),
             ('mpc', getattr(self, 'mpc', None)),
             ('retarget_global_ik', getattr(retargeter, '_global_ik_solver', None)),
@@ -1009,9 +1015,10 @@ class UnifiedPlannerNode(Node):
         GPU lock so it can't overlap a concurrent capture / depth integrate.
         """
         with self.gpu_lock:
-            if self.motion_planner is not None:
-                for name in ('trajopt_solver', 'ik_solver'):
-                    self._safe_reset_graph(getattr(self.motion_planner, name, None))
+            for planner in (self.motion_planner, self.joint_space_motion_planner):
+                if planner is not None:
+                    for name in ('trajopt_solver', 'ik_solver'):
+                        self._safe_reset_graph(getattr(planner, name, None))
             self._safe_reset_graph(self.mpc)
             self._safe_reset_graph(self.retargeter)
             # Every solver now holds no graph — its next call captures.

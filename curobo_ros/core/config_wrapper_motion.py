@@ -77,7 +77,51 @@ class ConfigWrapperMotion(ConfigWrapper):
         Build (or rebuild) the MotionPlanner and warmup.
 
         Called at init and on demand via the `update_motion_gen_config` service.
+        With the node parameter joint_space_own_planner, also builds the
+        MotionPlanner that joint-space plans use (node.joint_space_motion_planner).
         """
+        self.node_is_available = False
+        node.set_parameters([
+            rclpy.parameter.Parameter('node_is_available', rclpy.Parameter.Type.BOOL, False)
+        ])
+
+        try:
+            node.motion_planner = self._new_motion_planner(node, self.max_goalset)
+            # Legacy alias — some downstream code still references `node.motion_gen`.
+            node.motion_gen = node.motion_planner
+            own = (node.has_parameter('joint_space_own_planner')
+                   and node.get_parameter('joint_space_own_planner').value)
+            # A joint-space problem leaves the solvers in a state that breaks the
+            # next pose or grasp problem on the same MotionPlanner (cuRobo v0.8.0:
+            # a static grasp leg reported as success, or with CUDA graphs a crash):
+            # an own MotionPlanner keeps every problem type on its own solvers.
+            node.joint_space_motion_planner = (
+                self._new_motion_planner(node, 1) if own else None)
+        except Exception:
+            node.motion_planner = None
+            node.motion_gen = None
+            node.joint_space_motion_planner = None
+            raise
+
+        node.set_parameters([
+            rclpy.parameter.Parameter('node_is_available', rclpy.Parameter.Type.BOOL, True)
+        ])
+        self.node_is_available = True
+
+        # A new planner starts from the robot YAML with every obstacle on: give
+        # it the robot's spheres (links off, objects attached) and the obstacles off.
+        if hasattr(node, 'apply_solver_states'):
+            node.apply_solver_states()
+
+        node.get_logger().info("Motion planner configured")
+
+        if response is not None:
+            response.success = True
+            response.message = "Motion planner config set"
+        return response
+
+    def _new_motion_planner(self, node, max_goalset):
+        """A MotionPlanner on the robot, scene and collision cache, warmed up."""
         # No perception voxel layer at construction — collision_cache allocates
         # the voxel storage and update_world fills it by copy. Passing the live
         # layer aliases the solver's buffer onto our ESDF tensor, which the first
@@ -100,12 +144,9 @@ class ConfigWrapperMotion(ConfigWrapper):
             optimizer_collision_activation_distance=collision_activation_distance,
             max_batch_size=self.max_batch_size,
             multi_env=self.multi_env,
-            max_goalset=self.max_goalset,
+            max_goalset=max_goalset,
         )
-
-        node.motion_planner = MotionPlanner(cfg)
-        # Legacy alias — some downstream code still references `node.motion_gen`.
-        node.motion_gen = node.motion_planner
+        planner = MotionPlanner(cfg)
 
         # Output sampling step of the interpolated plan. It's a trajopt config
         # field (not a MotionPlannerCfg.create arg), so set it post-build, before
@@ -114,47 +155,22 @@ class ConfigWrapperMotion(ConfigWrapper):
         if node.has_parameter('interpolation_dt'):
             interp_dt = node.get_parameter('interpolation_dt').get_parameter_value().double_value
             try:
-                node.motion_planner.trajopt_solver.config.interpolation_dt = interp_dt
+                planner.trajopt_solver.config.interpolation_dt = interp_dt
                 node.get_logger().info(f"interpolation_dt set to {interp_dt}s")
             except AttributeError:
                 node.get_logger().warn("Could not set interpolation_dt on trajopt_solver")
 
         node.get_logger().info("warming up..")
-
-        self.node_is_available = False
-        node.set_parameters([
-            rclpy.parameter.Parameter('node_is_available', rclpy.Parameter.Type.BOOL, False)
-        ])
-
-        try:
-            node.motion_planner.warmup()
-        except Exception:
-            node.motion_planner = None
-            node.motion_gen = None
-            raise
-
-        node.set_parameters([
-            rclpy.parameter.Parameter('node_is_available', rclpy.Parameter.Type.BOOL, True)
-        ])
-        self.node_is_available = True
-
-        # A new planner starts from the robot YAML with every obstacle on: give
-        # it the robot's spheres (links off, objects attached) and the obstacles off.
-        if hasattr(node, 'apply_solver_states'):
-            node.apply_solver_states()
-
-        node.get_logger().info("Motion planner configured")
-
-        if response is not None:
-            response.success = True
-            response.message = "Motion planner config set"
-        return response
+        planner.warmup()
+        return planner
 
     def update_world_config(self, node):
         """Push the current Scene into all active solvers."""
         scene = self.obstacle_manager.get_scene()
-        if getattr(node, 'motion_planner', None) is not None:
-            node.motion_planner.update_world(scene)
+        for planner in (getattr(node, 'motion_planner', None),
+                        getattr(node, 'joint_space_motion_planner', None)):
+            if planner is not None:
+                planner.update_world(scene)
         if getattr(node, 'mpc', None) is not None:
             # MPCSolver has no top-level update_world(); go through its checker.
             node.mpc.scene_collision_checker.load_collision_model(scene)
