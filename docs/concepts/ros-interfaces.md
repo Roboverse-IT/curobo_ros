@@ -28,6 +28,7 @@ Request:
 | `target_joint_positions` | `float64[]` | Joint-space planner |
 | `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags for the single goal |
 | `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo) |
+| `time_dilation_factor` | `float64` | Slows the returned trajectory down: times divided by it, velocities multiplied by it, the path unchanged. `0` = as planned; otherwise in `(0, 1]`. Applies to the response only, not to a later `execute_trajectory` of the cached plan |
 
 Response:
 
@@ -145,8 +146,9 @@ Types: `curobo_msgs/srv/AttachObject` and `std_srvs/srv/Trigger`. Attaches an ex
 | `attach_link` | `string` | Empty = `attached_object`. A robot with one attach link per arm names it here |
 | `sphere_fit_type` | `int8` | `FIT_DEFAULT=0` (the library default, MorphIt), `FIT_SURFACE=1`, `FIT_VOXEL=2`, `FIT_MORPHIT=3` |
 | `num_spheres` | `int32` | `0` = estimated from the geometry; either way capped at the link's sphere budget |
+| `start_pose` | `sensor_msgs/JointState` | Configuration the object is attached at, in `joint_names` order. Empty = the robot's current one |
 
-The message also carries `type`, `header`, `mesh_file_path`, `pose` and `dimensions`, meant to describe a payload that is not a scene obstacle; that form is not implemented yet and `object_name` is required. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel. The fitted spheres reach every solver: `ik` / `ik_batch` answers account for the payload.
+With `object_name` empty, the payload is the geometry the request describes: `type` and `dimensions` as in `add_object`, `pose` in `header.frame_id` (empty = the robot base; otherwise a robot link fixed to a tool frame, e.g. the gripper), `mesh_file_path` absolute for a mesh. It is attached as `payload@<attach link>` and has no world copy. The spheres are fitted in the world and moved into the attach link's frame at the attach configuration. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel. The fitted spheres reach every solver: `ik` / `ik_batch` answers account for the payload.
 
 ### `/unified_planner/detach_link`
 
@@ -239,6 +241,14 @@ Type: `std_srvs/srv/Trigger`. Returns the active strategy key in `message`.
 ### `/unified_planner/get_robot_strategies`
 
 Type: `curobo_msgs/srv/GetRobotStrategies` (empty request). Returns `strategy_names` (valid keys), `current_strategy_name`, `success`.
+
+## Action — `/unified_planner/plan_grasp`
+
+Type: `curobo_msgs/action/GraspPlan`. cuRobo's grasp pipeline on the shared MotionPlanner: picks a candidate from `grasp_candidates` (a goal set), plans to the approach pose (`approach_offset` along `approach_axis`), then a straight leg to the grasp and a straight leg to the lift pose. `execute: false` plans only; `true` also runs the legs through the robot strategy and attaches `attach_object_name` after the grasp leg.
+
+- The node must be started with `max_goalset` at least the number of candidates, and the robot descriptor with `apply_curobo_patches: true` (fix 4: without it cuRobo v0.8.0's `plan_grasp` fails and leaves the IK unusable).
+- Every leg is checked before it is returned: it must start where the previous one ends, end within `grasp_position_tolerance` / `grasp_orientation_tolerance` of its pose, and the straight legs must stay within `grasp_line_tolerance` of their line with the tool's orientation held. cuRobo's straight legs are a cost, not a constraint: a leg that fails the check is re-planned, up to `grasp_max_attempts` times.
+- Result: the three legs (planned joints only, `joint_names` order), `dt`, and `goal_index`, the candidate the legs reach. `time_dilation_factor` slows the returned legs as in `generate_trajectory` (plan only).
 
 ## Action — `/unified_planner/execute_trajectory`
 

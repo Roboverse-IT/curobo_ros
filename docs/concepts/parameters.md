@@ -50,6 +50,12 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `trajectory_cache_ttl` | `30.0` | Lifetime (s) of a trajectory cached by `generate_trajectory` and reusable by the execute action (`allow_cached`) | Plan-time |
 | `sparse_voxel_publish_rate` | `7.0` | Publish rate (Hz) of `/unified_planner/voxel_grid_sparse`; `<= 0` disables | Startup |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |
+| `max_goalset` | `1` | Goal-set size the MotionPlanner is built for; `plan_grasp` needs at least its number of candidates | Build-time |
+| `joint_space_own_planner` | `false` | Joint-space plans on their own MotionPlanner. In cuRobo v0.8.0 a joint-space problem breaks the next pose or grasp problem on the same planner (with CUDA graphs the process crashes; without, a grasp leg that does not move is reported as success). Costs a second solver set on the GPU | Build-time |
+| `grasp_max_attempts` | `3` | `plan_grasp` re-plans when a leg fails its check, up to this many times | Plan-time |
+| `grasp_position_tolerance` | `0.005` | How far (m) a `plan_grasp` leg may end from its pose | Plan-time |
+| `grasp_orientation_tolerance` | `0.05` | How far (rad) a `plan_grasp` leg may end from its orientation, or turn on a straight leg | Plan-time |
+| `grasp_line_tolerance` | `0.005` | How far (m) a straight `plan_grasp` leg may stray from its line | Plan-time |
 
 ## Node parameters — perception (Mapper)
 
