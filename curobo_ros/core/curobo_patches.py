@@ -2,11 +2,27 @@
 them (``apply_curobo_patches: true``, see robot/robot_description.py).
 
 Reused as-is from the dual-arm bench where they were found and verified; only
-the text is translated. Three fixes:
+the text is translated. Four fixes:
 
 1) a joint reindex that does not touch ``knot``
 2) the ``warp.torch`` import
 3) an ``enable_obstacle`` that can also disable meshes
+4) ``plan_pose`` start states without ``dt`` (``plan_grasp``)
+
+--- 4) ``plan_pose`` and ``dt`` ---
+
+WHY. ``plan_grasp`` plans its grasp and lift legs from the last state of the
+previous leg, and that state carries the trajectory's ``dt``. A start state
+with a ``dt`` turns the IK velocity-aware: every joint may move only
+``velocity_limit * dt`` (about 0.04 rad) from it, so the leg finds no solution.
+Worse, the solvers' goal buffer keeps that ``dt`` for every later call, with or
+without one: after the first ``plan_grasp`` every IK fails until the planner is
+rebuilt. Measured on a KR810: goalset IK 12/12 before, 0/12 after.
+
+WHAT IT DOES. ``MotionPlanner.plan_pose`` drops the ``dt`` of the start state.
+A planning start state is a configuration, not a sample of a trajectory.
+
+To remove when NVIDIA fixes ``plan_grasp`` upstream.
 
 --- 3) ``enable_obstacle`` and meshes ---
 
@@ -72,6 +88,18 @@ def apply() -> bool:
 
     if getattr(ops, "_knot_patch_applied", False):
         return False
+
+    # 4) plan_grasp poisons the IK with the trajectory's dt
+    from curobo._src.motion.motion_planner import MotionPlanner
+    original_plan_pose = MotionPlanner.plan_pose
+
+    def plan_pose_without_dt(self, goal_tool_poses, current_state, *args, **kwargs):
+        if current_state is not None and current_state.dt is not None:
+            current_state = current_state.clone()
+            current_state.dt = None
+        return original_plan_pose(self, goal_tool_poses, current_state, *args, **kwargs)
+
+    MotionPlanner.plan_pose = plan_pose_without_dt
 
     original = ops.jit_inplace_reindex
 
