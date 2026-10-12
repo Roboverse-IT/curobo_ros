@@ -161,7 +161,9 @@ class ConfigWrapperMotion(ConfigWrapper):
                 node.get_logger().warn("Could not set interpolation_dt on trajopt_solver")
 
         node.get_logger().info("warming up..")
-        planner.warmup()
+        # cuRobo's warmup runs 10 plans to capture the CUDA graphs. Without graphs one
+        # plan compiles the kernels and allocates the buffers (Orin: ~150 s -> ~20 s).
+        planner.warmup(num_warmup_iterations=10 if self.use_cuda_graph else 1)
         return planner
 
     def update_world_config(self, node):
