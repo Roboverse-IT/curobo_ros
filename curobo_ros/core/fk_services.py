@@ -47,6 +47,7 @@ class FKServices:
         self._robot_config_file = robot_config_file
 
         self._fk_model: Kinematics | None = None
+        self._warm_batch = 0  # the largest batch the model is warmed up for
 
         # Resolve device/dtype from the node's tensor_args if present, else default.
         tensor_args = getattr(node, 'tensor_args', None)
@@ -69,8 +70,15 @@ class FKServices:
 
     def _warmup_fk_callback(self, request: WarmupFK.Request, response: WarmupFK.Response):
         batch_size = max(1, request.batch_size)
+        # Warmed up already: building the model again takes seconds (3.5 s on an
+        # Orin), longer than a client waiting for the service to be ready.
+        if self._fk_model is not None and batch_size <= self._warm_batch:
+            response.success = True
+            response.message = f"FK model ready (batch_size={self._warm_batch})"
+            return response
         try:
             self._init(batch_size)
+            self._warm_batch = batch_size
             response.success = True
             response.message = f"FK model ready (batch_size={batch_size})"
         except Exception as e:
