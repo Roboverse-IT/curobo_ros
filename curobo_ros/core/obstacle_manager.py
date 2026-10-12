@@ -79,14 +79,15 @@ class ObstacleManager:
         # The voxel sub-dict pre-allocates voxel collision storage in the
         # solvers (VoxelData.create_cache) and MUST match the Mapper's ESDF
         # grid: dims = extent in meters, voxel_size = ESDF voxel size.
+        voxel = self._declare_param('collision_cache_voxel', True)
         self.collision_cache = {
-            "cuboid": 100,
-            "mesh": 100,
+            "cuboid": int(self._declare_param('collision_cache_cuboid', 100)),
+            "mesh": int(self._declare_param('collision_cache_mesh', 100)),
             "voxel": {
                 "layers": 1,
                 "dims": list(self._mapper_extent_xyz),
                 "voxel_size": self._esdf_voxel_size,
-            },
+            } if voxel else None,
         }
 
         if initial_scene is not None:
