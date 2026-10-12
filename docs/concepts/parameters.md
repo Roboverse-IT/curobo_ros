@@ -56,6 +56,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `grasp_position_tolerance` | `0.005` | How far (m) a `plan_grasp` leg may end from its pose | Plan-time |
 | `grasp_orientation_tolerance` | `0.05` | How far (rad) a `plan_grasp` leg may end from its orientation, or turn on a straight leg | Plan-time |
 | `grasp_line_tolerance` | `0.005` | How far (m) a straight `plan_grasp` leg may stray from its line | Plan-time |
+| `pose_goal_selection` | `planner` | How the classic planner turns a pose goal into a joint configuration. `planner`: whichever IK solution `plan_pose` converges to, possibly far from the start or against a joint limit. `minimal_motion`: the IK solution nearest the start (seeds around it, joints of more than a turn on the turn nearest it, ≥ 0.05 rad from every limit), planned to in joint space, on the joint-space planner with `joint_space_own_planner`. Goals with path constraints or several tool frames stay with `plan_pose` | Plan-time |
 
 ## Node parameters — perception (Mapper)
 

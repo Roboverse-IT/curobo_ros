@@ -180,6 +180,11 @@ class UnifiedPlannerNode(Node):
         self.declare_parameter('grasp_position_tolerance', 0.005)
         self.declare_parameter('grasp_orientation_tolerance', 0.05)
         self.declare_parameter('grasp_line_tolerance', 0.005)
+        # How a pose goal (classic planner) picks its joint configuration:
+        # 'planner' takes whichever IK solution plan_pose converges to;
+        # 'minimal_motion' takes the IK solution nearest the start, clear of the
+        # joint limits, and plans to it in joint space.
+        self.declare_parameter('pose_goal_selection', 'planner')
 
         # Single shared context for every solver (robot + obstacles + scene +
         # collision cache). The MPC solver is built lazily from this same context.

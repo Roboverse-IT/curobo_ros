@@ -11,9 +11,23 @@ v2 notes:
   the whole path) — see SinglePlanner._apply_pose_constraints.
 """
 
+import math
+
+import torch
+
 from curobo.types import JointState, Pose, GoalToolPose
 
 from .single_planner import SinglePlanner
+
+# minimal_motion: a goal this close to a joint limit makes the next joint-space
+# plan fail (cuRobo v0.8.0), and the IK hands such goals out freely.
+LIMIT_MARGIN = 0.05
+# IK seeds scattered this much around the start find the solutions near it;
+# cuRobo's own seeds are random and land several radians away.
+SEED_NOISE = 0.6
+# IK solutions tried, nearest first; two closer than this count as one.
+MAX_CANDIDATES = 3
+SAME_SOLUTION = 0.05
 
 
 class ClassicPlanner(SinglePlanner):
@@ -70,6 +84,10 @@ class ClassicPlanner(SinglePlanner):
             goal = GoalToolPose.from_poses({tool_frame: pose})
 
         max_attempts = config.get('max_attempts', 1)
+        selection = self.node.get_parameter('pose_goal_selection').value
+        if selection not in ('planner', 'minimal_motion'):
+            raise ValueError(
+                f"pose_goal_selection must be 'planner' or 'minimal_motion', not '{selection}'")
 
         self.node.get_logger().info(f"Planning with max_attempts={max_attempts}")
 
@@ -77,6 +95,10 @@ class ClassicPlanner(SinglePlanner):
         # whole path). Reset afterwards since the MotionPlanner is shared.
         applied = self._apply_pose_constraints(goal_request)
         try:
+            # A joint-space plan cannot hold path constraints, and a multi-frame
+            # goal is one IK problem per arm: both stay with plan_pose.
+            if selection == 'minimal_motion' and not applied and not tool_frames:
+                return self._plan_minimal_motion(goal, start_state, max_attempts)
             return self.motion_planner.plan_pose(
                 goal,
                 start_state,
@@ -85,6 +107,70 @@ class ClassicPlanner(SinglePlanner):
         finally:
             if applied:
                 self._reset_pose_criteria()
+
+    def _plan_minimal_motion(self, goal, start_state, max_attempts):
+        """
+        Plan in joint space to the IK solution nearest the start, clear of the limits.
+
+        The IK runs twice with its configured number of seeds (its own random
+        ones, then seeds around the start), so its CUDA graph keeps its shape;
+        the joint-space plan runs on the joint-space MotionPlanner when the node
+        has one, so this planner's CUDA graphs never see a cspace problem.
+        Returns plan_cspace's result, or None.
+        """
+        mp = self.motion_planner
+        dof = mp.kinematics.get_dof()
+        start = start_state.position.view(1, -1)[:, :dof]
+        low, high = (limit.view(-1)[:dof].to(start)
+                     for limit in mp.kinematics.get_joint_limits().position)
+        n = mp.ik_solver.config.num_seeds
+        noise = torch.randn(
+            (n, dof), generator=torch.Generator(device=start.device).manual_seed(0),
+            device=start.device, dtype=start.dtype) * SEED_NOISE
+        noise[0] = 0.0
+        near = torch.maximum(torch.minimum(start + noise, high), low).view(1, n, dof)
+        found = []
+        for seeds in (None, near):
+            ik = mp.ik_solver.solve_pose(
+                goal, current_state=start_state, seed_config=seeds, return_seeds=n)
+            solved = ik.solution.reshape(-1, ik.solution.shape[-1])[ik.success.view(-1)]
+            found.append(solved[:, :dof])
+        solutions = torch.cat(found)
+        if solutions.shape[0] == 0:
+            self.node.get_logger().warn('minimal_motion: the IK found no solution')
+            return None
+        # A joint with more than a full turn of range: the same angle on the turn
+        # nearest the start, when that turn is inside the limits.
+        turns = torch.round((start - solutions) / (2 * math.pi))
+        turns[:, (high - low) < 2 * math.pi + 0.1] = 0.0
+        turned = solutions + 2 * math.pi * turns
+        inside = (turned >= low + LIMIT_MARGIN) & (turned <= high - LIMIT_MARGIN)
+        solutions = torch.where(inside, turned, solutions)
+        margin = torch.minimum(solutions - low, high - solutions).min(dim=-1).values
+        distance = (solutions - start).norm(dim=-1)
+        distance[margin < LIMIT_MARGIN] = float('inf')
+
+        planner = getattr(self.node, 'joint_space_motion_planner', None) or mp
+        result, tried = None, []
+        for k in torch.argsort(distance).tolist():
+            if len(tried) == MAX_CANDIDATES or not torch.isfinite(distance[k]):
+                break
+            q = solutions[k]
+            if any(float((q - t).abs().max()) < SAME_SOLUTION for t in tried):
+                continue
+            tried.append(q)
+            result = planner.plan_cspace(
+                JointState.from_position(q.view(1, -1).clone()), start_state,
+                max_attempts=max_attempts)
+            if result is not None and bool(result.success.any()):
+                self.node.get_logger().info(
+                    f'minimal_motion: IK solution {len(tried)} of {solutions.shape[0]}, '
+                    f'{float(distance[k]):.2f} rad from the start, '
+                    f'{float(margin[k]):.2f} rad from the nearest limit')
+                return result
+        self.node.get_logger().warn(
+            f'minimal_motion: {len(tried)} IK solution(s) clear of the limits, none planned')
+        return result
 
     def _goal_per_tool_frame(self, goal_request, tool_frames):
         """One goal per tool frame (TrajectoryGeneration.target_tool_frames):
