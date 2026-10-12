@@ -2,12 +2,26 @@
 them (``apply_curobo_patches: true``, see robot/robot_description.py).
 
 Reused as-is from the dual-arm bench where they were found and verified; only
-the text is translated. Four fixes:
+the text is translated. Five fixes:
 
 1) a joint reindex that does not touch ``knot``
 2) the ``warp.torch`` import
 3) an ``enable_obstacle`` that can also disable meshes
 4) ``plan_pose`` start states without ``dt`` (``plan_grasp``)
+5) a goal buffer that copies the caller's goal
+
+--- 5) the goal buffer keeps the caller's goal ---
+
+WHY. ``GoalManager.create_goal_buffer`` stores the goal poses and joint states
+it is given, not copies. Later calls write into them with ``copy_``. After a
+``plan_cspace`` the trajopt buffer holds the cspace call's tensors, and the next
+``plan_grasp`` returns success with a static grasp leg (0 mm instead of 80).
+It also explains why ``plan_grasp`` changes the ``GoalToolPose`` it is given.
+
+WHAT IT DOES. ``create_goal_buffer`` clones the goal poses, goal state and
+current state first. ``seed_goal_js`` is the solver's own and stays shared.
+
+To remove when NVIDIA fixes it upstream.
 
 --- 4) ``plan_pose`` and ``dt`` ---
 
@@ -100,6 +114,20 @@ def apply() -> bool:
         return original_plan_pose(self, goal_tool_poses, current_state, *args, **kwargs)
 
     MotionPlanner.plan_pose = plan_pose_without_dt
+
+    # 5) the goal buffer keeps the caller's goal
+    from curobo._src.solver.manager_goal import GoalManager
+    original_create_goal_buffer = GoalManager.create_goal_buffer
+
+    def create_goal_buffer_with_copies(self, solve_state, goal_tool_poses=None, goal_js=None,
+                                       current_js=None, seed_goal_js=None, current_state_dt=None):
+        def copy(x):
+            return None if x is None else x.clone()
+        return original_create_goal_buffer(
+            self, solve_state, copy(goal_tool_poses), copy(goal_js), copy(current_js),
+            seed_goal_js, current_state_dt)
+
+    GoalManager.create_goal_buffer = create_goal_buffer_with_copies
 
     original = ops.jit_inplace_reindex
 
