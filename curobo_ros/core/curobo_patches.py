@@ -2,13 +2,46 @@
 them (``apply_curobo_patches: true``, see robot/robot_description.py).
 
 Reused as-is from the dual-arm bench where they were found and verified; only
-the text is translated. Five fixes:
+the text is translated. Seven fixes:
 
 1) a joint reindex that does not touch ``knot``
 2) the ``warp.torch`` import
 3) an ``enable_obstacle`` that can also disable meshes
 4) ``plan_pose`` start states without ``dt`` (``plan_grasp``)
 5) a goal buffer that copies the caller's goal
+6) each tool-pose kernel in its own warp module (NVlabs/curobo dc2383a)
+7) ``solve_cspace`` without ``goal_state`` (NVlabs/curobo #670, core only)
+
+--- 7) ``solve_cspace`` without ``goal_state`` ---
+
+WHY. ``solve_cspace`` passes ``goal_state``, so a joint-space plan adds
+``goal_js`` to the trajopt goal buffer and rebuilds it at one goal. The next
+pose or grasp plan rebuilds it again. Each rebuild resets and recaptures the CUDA
+graphs, and switches the tool-pose kernel (see 6).
+
+WHAT IT DOES. Drops ``goal_state`` in the ``_solve_impl`` call that
+``solve_cspace`` makes, as upstream #670 does. The plan still ends on the target:
+``solve_cspace`` seeds every trajectory with it and pins the last waypoint
+(``use_implicit_goal``). Not ported from #670: the finetune settings of
+``plan_cspace`` (3 passes, dt scale 0.75) and the seed re-ranking after the
+finetune passes, which concern every problem type.
+
+To remove when cuRobo > 0.8.0 is installed.
+
+--- 6) each tool-pose kernel in its own warp module ---
+
+WHY. ``ToolPoseCost`` builds a new kernel every time ``num_goalset`` changes,
+all with one name in the module ``curobo._src.cost.wp_tool_pose``. The cost
+keeps only the latest, so the module changes and is reloaded whole at every
+switch. A CUDA graph captured before the reload replays unloaded code:
+``cudaErrorIllegalInstruction`` (x86).
+
+WHAT IT DOES. As upstream dc2383a: the kernel gets a name per (goalset size,
+rotation method) and its own module (``module="unique"``). A new size adds a
+module and leaves the loaded ones alone. The installed template is reused; the
+kernel the original factory registers in ``wp_tool_pose`` is never launched.
+
+To remove when cuRobo > 0.8.0 is installed.
 
 --- 5) the goal buffer keeps the caller's goal ---
 
@@ -128,6 +161,41 @@ def apply() -> bool:
             seed_goal_js, current_state_dt)
 
     GoalManager.create_goal_buffer = create_goal_buffer_with_copies
+
+    # 6) each tool-pose kernel in its own warp module
+    import curobo._src.cost.cost_tool_pose as cost_tool_pose
+    make_tool_pose_kernel = cost_tool_pose.create_goalset_pose_distance_kernel_with_constants
+
+    def tool_pose_kernel_in_own_module(num_goalset, rotation_method=0):
+        template = make_tool_pose_kernel(num_goalset, rotation_method).func
+        template.__name__ = template.__qualname__ = (
+            f'goalset_pose_distance_{num_goalset}_{rotation_method}')
+        return wp.kernel(module='unique')(template)
+
+    cost_tool_pose.create_goalset_pose_distance_kernel_with_constants = (
+        tool_pose_kernel_in_own_module)
+
+    # 7) solve_cspace without goal_state
+    import threading
+    from curobo._src.solver.solver_trajopt import TrajOptSolver
+    original_solve_cspace = TrajOptSolver.solve_cspace
+    original_solve_impl = TrajOptSolver._solve_impl
+    in_solve_cspace = threading.local()
+
+    def solve_cspace_implicit_goal(self, *args, **kwargs):
+        in_solve_cspace.active = True
+        try:
+            return original_solve_cspace(self, *args, **kwargs)
+        finally:
+            in_solve_cspace.active = False
+
+    def solve_impl(self, *args, **kwargs):
+        if getattr(in_solve_cspace, 'active', False):
+            kwargs['goal_state'] = None
+        return original_solve_impl(self, *args, **kwargs)
+
+    TrajOptSolver.solve_cspace = solve_cspace_implicit_goal
+    TrajOptSolver._solve_impl = solve_impl
 
     original = ops.jit_inplace_reindex
 

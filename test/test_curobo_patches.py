@@ -1,5 +1,8 @@
-"""Patch 5: cuRobo's goal buffer must not keep the caller's tensors."""
+"""Patches 5 and 6: goal buffer ownership, tool-pose kernels and their warp modules."""
 
+import gc
+
+import curobo._src.cost.cost_tool_pose as cost_tool_pose
 from curobo._src.solver.manager_goal import GoalManager
 from curobo._src.solver.solve_mode import SolveMode
 from curobo._src.solver.solve_state import SolveState
@@ -59,4 +62,28 @@ def test_goal_buffer_does_not_keep_caller_tensors(name):
                 problems.append(f'{step}: {name}.{c} changed')
             if getattr(stored, c).data_ptr() == getattr(first, c).data_ptr():
                 problems.append(f'{step}: buffer shares {name}.{c} with the caller')
+    assert not problems, '; '.join(problems)
+
+
+@pytest.mark.parametrize('sequence', [(4, 1, 4, 1), (4, 1, 2, 4)],
+                         ids=['switch_and_return', 'new_size'])
+def test_tool_pose_kernel_switch_keeps_loaded_modules(sequence):
+    """Goalset switches never change, so never reload, a module a kernel already used."""
+    make = cost_tool_pose.create_goalset_pose_distance_kernel_with_constants
+    modules = {}
+    for size in (4, 1):  # like a warmup; ToolPoseCost keeps only its latest kernel
+        modules[size] = make(size, 0).module
+        gc.collect()
+    prepared = {size: (module, module.get_module_hash()) for size, module in modules.items()}
+    problems = []
+    for step, size in enumerate(sequence):
+        kernel = make(size, 0)
+        gc.collect()
+        if size in prepared and kernel.module is not prepared[size][0]:
+            problems.append(f'step {step}: goalset {size} got another module')
+        for prepared_size, (module, module_hash) in prepared.items():
+            if module.get_module_hash() != module_hash:
+                problems.append(
+                    f'step {step} (goalset {size}): module of goalset {prepared_size} changed')
+        del kernel
     assert not problems, '; '.join(problems)
