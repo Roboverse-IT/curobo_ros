@@ -14,7 +14,12 @@ on the node's shared MotionPlanner. Restored from will-44's GraspPlanner
   linear legs are a cost, not a constraint): a failed check re-plans, up to
   ``grasp_max_attempts`` times;
 - ``time_dilation_factor`` slows the legs down;
-- the attach goes through AttachmentServices (per link, every solver).
+- the attach goes through AttachmentServices (per link, every solver);
+- with ``pose_goal_selection: minimal_motion`` the APPROACH leg is a joint-space
+  plan to the approach IK solution nearest the start, over every candidate
+  (cuRobo's goes wherever its random IK seeds land); GRASP and LIFT stay
+  cuRobo's linear legs. When a leg fails or fails its check, the next nearest
+  approach solution is tried.
 
 Needs ``apply_curobo_patches`` (fix 4, ``core/curobo_patches.py``): without it
 cuRobo v0.8.0's plan_grasp fails and leaves the IK unusable.
@@ -23,15 +28,22 @@ cuRobo v0.8.0's plan_grasp fails and leaves the IK unusable.
 import math
 import time
 import traceback
+from types import SimpleNamespace
 
 import torch
+from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
+from curobo._src.state.state_joint_trajectory_ops import get_joint_state_at_horizon_index
 from curobo.types import GoalToolPose, JointState, Pose
 
 from curobo_msgs.action import GraspPlan
 
 from curobo_ros.core.time_dilation import check_factor, dilate
 
+from . import minimal_motion
+
 LEGS = ("approach", "grasp", "lift")
+# minimal_motion: approach solutions tried per attempt, nearest first.
+GRASP_TRIES = 6
 
 
 def _axis(name: str):
@@ -83,20 +95,24 @@ class GraspPlanner:
         check_factor(goal.time_dilation_factor)
 
         attempts = max(1, int(self.node.get_parameter('grasp_max_attempts').value))
+        nearest = self.node.get_parameter('pose_goal_selection').value == 'minimal_motion'
         message = ""
         for attempt in range(1, attempts + 1):
-            result = mp.plan_grasp(
-                grasp_poses=self._goalset(goal.grasp_candidates, frames[0]),
-                current_state=start_state,
-                grasp_approach_axis=goal.approach_axis or "z",
-                grasp_approach_offset=goal.approach_offset,
-                grasp_approach_in_tool_frame=goal.approach_in_tool_frame,
-                grasp_lift_axis=goal.lift_axis or "z",
-                grasp_lift_offset=goal.lift_offset,
-                grasp_lift_in_tool_frame=goal.lift_in_tool_frame,
-                plan_approach_to_grasp=goal.plan_approach_to_grasp,
-                plan_grasp_to_lift=goal.plan_grasp_to_lift,
-            )
+            if nearest:
+                result = self._plan_minimal_motion(start_state, goal, frames[0])
+            else:
+                result = mp.plan_grasp(
+                    grasp_poses=self._goalset(goal.grasp_candidates, frames[0]),
+                    current_state=start_state,
+                    grasp_approach_axis=goal.approach_axis or "z",
+                    grasp_approach_offset=goal.approach_offset,
+                    grasp_approach_in_tool_frame=goal.approach_in_tool_frame,
+                    grasp_lift_axis=goal.lift_axis or "z",
+                    grasp_lift_offset=goal.lift_offset,
+                    grasp_lift_in_tool_frame=goal.lift_in_tool_frame,
+                    plan_approach_to_grasp=goal.plan_approach_to_grasp,
+                    plan_grasp_to_lift=goal.plan_grasp_to_lift,
+                )
             if not self._flag(result.success):
                 message = f"attempt {attempt}: {result.status}"
                 self.node.get_logger().warn(f"Grasp {message}")
@@ -109,6 +125,113 @@ class GraspPlanner:
             message = f"attempt {attempt}: {problem}"
             self.node.get_logger().warn(f"Grasp leg check failed, {message}")
         return None, -1, f"Grasp planning failed after {attempts} attempt(s), last {message}"
+
+    def _plan_minimal_motion(self, start_state, goal, frame):
+        """
+        APPROACH: joint-space plan to an approach IK solution, nearest the start
+        first, over every candidate. GRASP and LIFT: cuRobo's linear legs from there
+        (its plan_grasp steps 3 and 4). A solution whose legs fail to plan or fail the
+        checks gives way to the next one. Returns the plan_grasp result fields
+        ``_legs`` reads.
+        """
+        mp = self.motion_planner
+        out = SimpleNamespace(success=torch.tensor([False]), status="", goalset_index=None)
+        found = []
+        for i in range(len(goal.grasp_candidates)):
+            p, q = self._targets(goal, i, frame)["approach"]
+            approach = GoalToolPose.from_poses({frame: Pose.from_list(p + q)})
+            solutions, distance, margin = minimal_motion.ik_solutions(mp, approach, start_state)
+            found.append((solutions, distance, margin, [i] * solutions.shape[0]))
+        solutions, distance, margin = (torch.cat([f[k] for f in found]) for k in range(3))
+        candidate = [i for f in found for i in f[3]]
+        if solutions.shape[0] == 0:
+            out.status = "minimal_motion: the IK found no approach solution"
+            return out
+        planner = getattr(self.node, 'joint_space_motion_planner', None) or mp
+        max_attempts = max(1, int(self.node.get_parameter('max_attempts').value))
+        failures = []
+        for tried, k in enumerate(minimal_motion.nearest_first(solutions, distance, GRASP_TRIES), 1):
+            goal_index = candidate[k]
+            where = f"grasp candidate {goal_index}, approach IK solution {tried} of {solutions.shape[0]}"
+            legs = self._plan_legs(planner, solutions[k], start_state, goal, goal_index, frame,
+                                   max_attempts)
+            problem = legs if isinstance(legs, str) else self._check(
+                self._legs(legs, goal), start_state, goal, goal_index, frame)
+            if problem is not None:
+                failures.append(f"{tried}: {problem}")
+                self.node.get_logger().warn(f"minimal_motion: {where}: {problem}, trying the next one")
+                continue
+            self.node.get_logger().info(
+                f"minimal_motion: {where}, {float(distance[k]):.2f} rad from the start, "
+                f"{float(margin[k]):.2f} rad from the nearest limit")
+            legs.success = torch.tensor([True])
+            legs.goalset_index = torch.tensor([goal_index])
+            return legs
+        out.status = ("minimal_motion: no approach solution planned ("
+                      + ("; ".join(failures) or "none clear of the limits") + ")")
+        return out
+
+    def _plan_legs(self, planner, q, start_state, goal, goal_index, frame, max_attempts):
+        """APPROACH to ``q``, then the linear legs. The plan_grasp result fields, or
+        what failed."""
+        approach = minimal_motion.plan_to(planner, q, start_state, max_attempts)
+        if not minimal_motion.succeeded(approach):
+            return "approach leg failed (no joint-space plan)"
+        out = SimpleNamespace(success=torch.tensor([False]), status="", goalset_index=None)
+        self._keep(out, "approach", approach)
+        targets = self._targets(goal, goal_index, frame)
+        legs = [("grasp", goal.approach_axis or "z", goal.approach_in_tool_frame)]
+        if goal.plan_grasp_to_lift:
+            legs.append(("lift", goal.lift_axis or "z", goal.lift_in_tool_frame))
+        if not goal.plan_approach_to_grasp:
+            legs = []
+        last = approach
+        for leg, axis, in_tool_frame in legs:
+            p, q_target = targets[leg]
+            result = self._linear(frame, Pose.from_list(p + q_target), axis, in_tool_frame,
+                                  self._last(last))
+            if not minimal_motion.succeeded(result):
+                return f"{leg} leg failed ({self._why(result)})"
+            self._keep(out, leg, result)
+            last = result
+        return out
+
+    @staticmethod
+    def _why(result) -> str:
+        """What a failed cuRobo result tells: its smallest pose errors."""
+        if result is None:
+            return "no result"
+        parts = []
+        for name, scale, unit in (("position_error", 1000.0, " mm"), ("rotation_error", 1.0, "")):
+            value = getattr(result, name, None)
+            if value is not None and value.numel():
+                parts.append(f"{name.split('_')[0]} error {float(value.min()) * scale:.1f}{unit}")
+        return ", ".join(parts) or "no success"
+
+    def _linear(self, frame, pose, axis, in_tool_frame, start):
+        """A linear leg as cuRobo's plan_grasp plans it: plan_pose with the
+        linear-motion criteria, the grasp contact links out of collision."""
+        mp = self.motion_planner
+        links = mp.kinematics.config.kinematics_config.grasp_contact_link_names or []
+        mp.update_tool_pose_criteria({frame: ToolPoseCriteria.linear_motion(
+            axis=axis, non_terminal_scale=1.0, project_distance_to_goal=in_tool_frame)})
+        mp.disable_link_collision(links)
+        try:
+            return mp.plan_pose(GoalToolPose.from_poses(
+                {frame: pose}, ordered_tool_frames=[frame], num_goalset=1), start)
+        finally:
+            mp.enable_link_collision(links)
+            mp.update_tool_pose_criteria({frame: ToolPoseCriteria()})
+
+    def _last(self, result) -> JointState:
+        """The last planned state of a leg, on the active joints."""
+        end = get_joint_state_at_horizon_index(result.js_solution, -1).squeeze(0)
+        return self.motion_planner.kinematics.get_active_js(end)
+
+    @staticmethod
+    def _keep(out, leg, result) -> None:
+        setattr(out, f"{leg}_interpolated_trajectory", result.interpolated_trajectory)
+        setattr(out, f"{leg}_interpolated_last_tstep", result.interpolated_last_tstep)
 
     def _goalset(self, poses, frame) -> GoalToolPose:
         """geometry_msgs/Pose[] -> GoalToolPose [B=1, H=1, L=1, G, 3/4] on ``frame``."""
