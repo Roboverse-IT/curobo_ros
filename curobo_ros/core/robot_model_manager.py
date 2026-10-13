@@ -46,15 +46,24 @@ class RobotModelManager:
         )
         return self.kin_model.compute_kinematics(js)
 
-    def get_collision_spheres(self) -> List[List[float]]:
+    def _robot_state(self, kinematics) -> JointState:
+        """Return the robot's current joints, reduced to the active joints of ``kinematics``.
+
+        The robot reports every joint of its description; a kinematics with locked
+        joints (the station: left arm and column) takes its active ones only.
+        """
         q_js = JointState(
             position=torch.tensor(
                 self.robot.get_joint_pose(),
                 dtype=self._ops_dtype,
                 device=self._device,
             ),
-            joint_names=self.kin_model.joint_names,
+            joint_names=list(self.robot.get_joint_name()),
         )
+        return kinematics.get_active_js(q_js)
+
+    def get_collision_spheres(self) -> List[List[float]]:
+        q_js = self._robot_state(self.kin_model)
 
         kinematics_state = self.kin_model.compute_kinematics(q_js)
         # robot_spheres shape: [batch, horizon, num_spheres, 4]
@@ -73,14 +82,7 @@ class RobotModelManager:
         attached_mask [bool, …])``; when nothing is attached the attach_link
         spheres carry radius <= 0 and are filtered by the caller.
         """
-        q_js = JointState(
-            position=torch.tensor(
-                self.robot.get_joint_pose(),
-                dtype=self._ops_dtype,
-                device=self._device,
-            ),
-            joint_names=kinematics.joint_names,
-        )
+        q_js = self._robot_state(kinematics)
         spheres = kinematics.compute_kinematics(q_js).robot_spheres.reshape(-1, 4)
         spheres = spheres.cpu().numpy().tolist()
 
