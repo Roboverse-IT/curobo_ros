@@ -1,0 +1,152 @@
+# Dual-arm contract for tool frames that hold (hold_tool_frames) and grasping frames
+# (grasp_tool_frames), on cuRobo's stock dual UR10e (robots/dual_ur10e.yaml): tool1, tool0.
+# Shapes, outcomes and messages only (the generator has no numeric tolerance); that the
+# holding arm really stays still is measured by the AMR node test outside this suite.
+#
+# START and the tool1 goal as in test_dual_arm.yaml: the planner's joint order puts the arm
+# of tool1 (_1 suffix) first; the goal is the FK of START with joints 1-2 of that arm moved.
+
+package: curobo_ros
+environment:
+  launch:
+    - package: curobo_ros
+      executable: gen_traj_test_dual_arm.launch.py
+      name: gen_traj_dual_arm_hold
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0
+  allowable_exit_codes: [0, -2, -9]
+
+tests:
+  - name: "01 tool1 moves, tool0 holds"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    timeout: 90.0
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_poses:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      target_tool_frames: ["tool1"]
+      hold_tool_frames: ["tool0"]
+    expect: {success: True}
+
+  - name: "02 a frame both moving and holding is refused"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_poses:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      target_tool_frames: ["tool1"]
+      hold_tool_frames: ["tool1"]
+    expect: {success: False, message: "Planning error: target_tool_frames%"}
+
+  - name: "03 hold_tool_frames without target_tool_frames is refused"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_pose:
+        position: {x: 0.2728, y: -0.3256, z: 0.9043}
+        orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      hold_tool_frames: ["tool0"]
+    expect: {success: False, message: "Planning error: hold_tool_frames needs target_tool_frames%"}
+
+  - name: "04 joint-space planner"
+    service: "/unified_planner/set_planner"
+    type: curobo_msgs/srv/SetPlanner
+    data:
+      planner_type: 5
+    expect: {success: True}
+
+  - name: "05 joint space, tool0 holds with its joints unchanged"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    timeout: 90.0
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_joint_positions: [-1.37, -2.0, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      hold_tool_frames: ["tool0"]
+    expect: {success: True}
+
+  - name: "06 joint space, a holding arm whose target moves is refused"
+    service: "/unified_planner/generate_trajectory"
+    type: curobo_msgs/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      target_joint_positions: [-1.37, -2.0, 1.9, -1.383, -1.57, 0.0, 1.77, -0.63, -1.9, -1.7, 1.57, 0.0]
+      hold_tool_frames: ["tool0"]
+    expect: {success: False, message: "Planning error: hold_tool_frames%"}
+
+  - name: "07 back to the classic planner"
+    service: "/unified_planner/set_planner"
+    type: curobo_msgs/srv/SetPlanner
+    data:
+      planner_type: 0
+    expect: {success: True}
+
+  - name: "08 tool1 grasps, tool0 holds"
+    action: "/unified_planner/plan_grasp"
+    type: curobo_msgs/action/GraspPlan
+    timeout: 120.0
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      grasp_candidates:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      grasp_tool_frames: ["tool1"]
+      hold_tool_frames: ["tool0"]
+      approach_offset: -0.05
+      lift_offset: 0.05
+      lift_in_tool_frame: false
+      execute: false
+    expect: {success: True, goal_index: 0}
+
+  - name: "09 a grasp on a two-frame robot needs grasp_tool_frames"
+    action: "/unified_planner/plan_grasp"
+    type: curobo_msgs/action/GraspPlan
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      grasp_candidates:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      execute: false
+    expect: {success: False, message: "Grasp error: a robot with tool frames%"}
+
+  - name: "10 every tool frame grasps or holds"
+    action: "/unified_planner/plan_grasp"
+    type: curobo_msgs/action/GraspPlan
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      grasp_candidates:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      grasp_tool_frames: ["tool1"]
+      execute: false
+    expect: {success: False, message: "Grasp error: grasp_tool_frames%"}
+
+  - name: "11 attach_object_name is refused on a two-frame grasp"
+    action: "/unified_planner/plan_grasp"
+    type: curobo_msgs/action/GraspPlan
+    data:
+      start_pose:
+        position: [-1.57, -2.2, 1.9, -1.383, -1.57, 0.0, 1.57, -0.63, -1.9, -1.7, 1.57, 0.0]
+      grasp_candidates:
+        - position: {x: 0.2728, y: -0.3256, z: 0.9043}
+          orientation: {x: -0.7060, y: 0.7060, z: -0.0394, w: 0.0399}
+      grasp_tool_frames: ["tool1"]
+      hold_tool_frames: ["tool0"]
+      attach_object_name: "part"
+      execute: false
+    expect: {success: False, message: "Grasp error: attach_object_name%"}

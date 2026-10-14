@@ -18,6 +18,18 @@ FAILED_TESTS=0
 FAILED_TEST_LIST=()
 
 
+echo "Running test_test_dual_arm_hold..."
+if timeout 830 launch_test "${TEST_DIR}/test_test_dual_arm_hold.py" > /dev/null 2>&1; then
+    echo "  ✓ test_test_dual_arm_hold PASSED"
+    ((PASSED_TESTS++)) || true
+else
+    echo "  ✗ test_test_dual_arm_hold FAILED"
+    ((FAILED_TESTS++)) || true
+    FAILED_TEST_LIST+=("test_test_dual_arm_hold")
+fi
+((TOTAL_TESTS++)) || true
+echo ""
+
 echo "Running test_test_robot_strategy..."
 if timeout 330 launch_test "${TEST_DIR}/test_test_robot_strategy.py" > /dev/null 2>&1; then
     echo "  ✓ test_test_robot_strategy PASSED"
