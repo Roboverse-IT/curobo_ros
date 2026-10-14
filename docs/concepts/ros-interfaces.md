@@ -24,7 +24,8 @@ Request:
 | `start_pose` | `sensor_msgs/JointState` | All planners. Empty = current robot state |
 | `target_pose` | `geometry_msgs/Pose` | Classic planner (single Cartesian goal) |
 | `target_poses` | `geometry_msgs/Pose[]` | Multi-point planner (sequence of waypoints); classic planner with `target_tool_frames` |
-| `target_tool_frames` | `string[]` | Classic planner, robots with several tool frames (e.g. dual-arm): `target_poses[k]` is the goal of `target_tool_frames[k]`, all reached by one trajectory. Name every tool frame of the robot (the read-only `tool_frames` parameter); a frame that must stay put gets its current pose. Empty = the single-goal behaviour above. Other planners refuse it |
+| `target_tool_frames` | `string[]` | Classic planner, robots with several tool frames (e.g. dual-arm): `target_poses[k]` is the goal of `target_tool_frames[k]`, all reached by one trajectory. Name every tool frame of the robot (the read-only `tool_frames` parameter); a frame that must stay put gets its current pose, or goes in `hold_tool_frames`. Empty = the single-goal behaviour above. Other planners refuse it |
+| `hold_tool_frames` | `string[]` | Classic and joint-space planners, robots with several tool frames: frames whose arm stays at its `start_pose` joints along the whole trajectory (pose weighted along the path, then joints frozen, then the trajectory checked again with the planner's own model; a failed check is a failed attempt). With `target_tool_frames`, every tool frame is named once in one list or the other. Joint space: the holding arms' target joints must equal their start. `trajectory_constraints` only with one moving frame, the others holding |
 | `target_joint_positions` | `float64[]` | Joint-space planner |
 | `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags for the single goal |
 | `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo) |
@@ -246,6 +247,7 @@ Type: `curobo_msgs/srv/GetRobotStrategies` (empty request). Returns `strategy_na
 
 Type: `curobo_msgs/action/GraspPlan`. cuRobo's grasp pipeline on the shared MotionPlanner: picks a candidate from `grasp_candidates` (a goal set), plans to the approach pose (`approach_offset` along `approach_axis`), then a straight leg to the grasp and a straight leg to the lift pose. `execute: false` plans only; `true` also runs the legs through the robot strategy and attaches `attach_object_name` after the grasp leg.
 
+- Robots with several tool frames: `grasp_tool_frames` names the frames that grasp and `grasp_candidates` holds one block of G candidates per listed frame, in that order (candidate g of every frame is reached together); `hold_tool_frames` names the others, which hold as in `generate_trajectory`. Every tool frame is named once. The approach is a joint-space plan to the IK solution nearest the start; `attach_object_name` is refused (attach per arm with `attach_object` and its `attach_link`).
 - The node must be started with `max_goalset` at least the number of candidates, and the robot descriptor with `apply_curobo_patches: true` (fix 4: without it cuRobo v0.8.0's `plan_grasp` fails and leaves the IK unusable).
 - Every leg is checked before it is returned: it must start where the previous one ends, end within `grasp_position_tolerance` / `grasp_orientation_tolerance` of its pose, and the straight legs must stay within `grasp_line_tolerance` of their line with the tool's orientation held. cuRobo's straight legs are a cost, not a constraint: a leg that fails the check is re-planned, up to `grasp_max_attempts` times.
 - Result: the three legs (planned joints only, `joint_names` order), `dt`, and `goal_index`, the candidate the legs reach. `time_dilation_factor` slows the returned legs as in `generate_trajectory` (plan only).
@@ -262,6 +264,7 @@ Goal (mirrors `TrajectoryGeneration`; the active planner decides which fields it
 | `target_pose` | `geometry_msgs/Pose` | Classic / MPC / Retarget |
 | `target_poses` | `geometry_msgs/Pose[]` | Multi-point; classic with `target_tool_frames` |
 | `target_tool_frames` | `string[]` | Classic: one goal per tool frame, as in `generate_trajectory` |
+| `hold_tool_frames` | `string[]` | Tool frames that hold, as in `generate_trajectory` |
 | `target_joint_positions` | `float64[]` | Joint-space |
 | `allow_cached` | `bool` (default `true`) | Reuse a matching, non-expired trajectory from a previous `generate_trajectory` call |
 

@@ -11,9 +11,16 @@ v2 notes:
   the whole path) — see SinglePlanner._apply_pose_constraints.
 """
 
+import itertools
+import time
+
+from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 from curobo.types import JointState, Pose, GoalToolPose
 
-from . import minimal_motion
+from . import hold, minimal_motion
+
+# Per-frame IK combinations planned at most (several moving tool frames).
+MAX_COMBINATIONS = 4
 from .single_planner import SinglePlanner
 
 
@@ -53,6 +60,13 @@ class ClassicPlanner(SinglePlanner):
             MotionPlannerResult-like object.
         """
         tool_frames = list(getattr(goal_request, 'target_tool_frames', None) or [])
+        holding = list(getattr(goal_request, 'hold_tool_frames', None) or [])
+        selection = self.node.get_parameter('pose_goal_selection').value
+        if holding and not tool_frames:
+            raise ValueError("hold_tool_frames needs target_tool_frames: the goals of the other frames")
+        if holding or (tool_frames and selection == 'minimal_motion'):
+            return self._plan_frames(start_state, goal_request, tool_frames, holding,
+                                     config.get('max_attempts', 1), selection)
         if tool_frames:
             goal = self._goal_per_tool_frame(goal_request, tool_frames)
         else:
@@ -71,7 +85,6 @@ class ClassicPlanner(SinglePlanner):
             goal = GoalToolPose.from_poses({tool_frame: pose})
 
         max_attempts = config.get('max_attempts', 1)
-        selection = self.node.get_parameter('pose_goal_selection').value
         if selection not in ('planner', 'minimal_motion'):
             raise ValueError(
                 f"pose_goal_selection must be 'planner' or 'minimal_motion', not '{selection}'")
@@ -120,6 +133,119 @@ class ClassicPlanner(SinglePlanner):
         self.node.get_logger().warn(
             f'minimal_motion: {tried} IK solution(s) clear of the limits, none planned')
         return result
+
+    def _plan_frames(self, start_state, goal_request, moving, holding, max_attempts, selection):
+        """
+        A goal per moving tool frame; the frames in ``holding`` hold (planners/hold.py).
+
+        minimal_motion: the IK solution of the whole goal nearest the start (holding
+        joints at their start values), planned in joint space, nearest first. Then, or
+        with 'planner', plan_pose with the holding frames weighted along the path. Every
+        plan has the holding joints frozen and is re-checked. trajectory_constraints
+        (a straight leg) only with one moving frame, the others holding.
+        """
+        if selection not in ('planner', 'minimal_motion'):
+            raise ValueError(
+                f"pose_goal_selection must be 'planner' or 'minimal_motion', not '{selection}'")
+        mp = self.motion_planner
+        if len(moving) != len(goal_request.target_poses):
+            raise ValueError(
+                f"target_tool_frames has {len(moving)} frames but target_poses "
+                f"{len(goal_request.target_poses)} poses: one pose per frame")
+        frozen = hold.split(mp, moving, holding)
+        poses = {f: Pose.from_list([p.position.x, p.position.y, p.position.z, p.orientation.w,
+                                    p.orientation.x, p.orientation.y, p.orientation.z])
+                 for f, p in zip(moving, goal_request.target_poses)}
+        poses.update(hold.current_poses(mp, start_state, holding))
+        goal = hold.goal(mp, poses)
+        criteria = {f: hold.held() for f in holding}
+        constraints = list(getattr(goal_request, 'trajectory_constraints', []) or [])
+        if any(c == 1 for c in constraints):
+            if len(moving) != 1 or len(constraints) != 6:
+                raise ValueError(
+                    "trajectory_constraints need one moving tool frame, the others holding, "
+                    "and 6 entries [theta_x, theta_y, theta_z, x, y, z]")
+            tx, ty, tz, x, y, z = (1.0 if c == 1 else 0.0 for c in constraints)
+            criteria[moving[0]] = ToolPoseCriteria(non_terminal_pose_axes_weight_factor=[x, y, z, tx, ty, tz])
+        margin = float(self.node.get_parameter('self_collision_margin_m').value)
+        started = time.monotonic()
+        log = self.node.get_logger()
+        result = None
+        planner = getattr(self.node, 'joint_space_motion_planner', None) or mp
+        if selection == 'minimal_motion' and len(moving) > 1:
+            # Several moving frames: the nearest IK solution of each frame on its own,
+            # combined. A joint IK of all frames finds far fewer solutions, often far away.
+            for tried, (dist, q) in enumerate(self._per_frame_solutions(mp, poses, start_state, moving), 1):
+                if tried > MAX_COMBINATIONS or (tried > 1 and not hold.budget_left(self.node, started)):
+                    break
+                result = hold.finish(mp, minimal_motion.plan_to(planner, q, start_state, max_attempts),
+                                     start_state, frozen, margin)
+                if minimal_motion.succeeded(result):
+                    log.info(f'minimal_motion ({len(moving)} moving, {len(holding)} holding): per-frame IK '
+                             f'combination {tried}, {dist:.2f} rad from the start')
+                    return result
+                log.warn(f'minimal_motion: per-frame IK combination {tried}: '
+                         f'{getattr(result, "status", "no plan")}')
+        if selection == 'minimal_motion' and moving[0] not in criteria:
+            solutions, distance, limit = minimal_motion.ik_solutions(mp, goal, start_state, frozen)
+            for tried, k in enumerate(minimal_motion.nearest_first(solutions, distance), 1):
+                if tried > 1 and not hold.budget_left(self.node, started):
+                    break
+                result = hold.finish(mp, minimal_motion.plan_to(planner, solutions[k], start_state, max_attempts),
+                                     start_state, frozen, margin)
+                if minimal_motion.succeeded(result):
+                    log.info(f'minimal_motion ({len(moving)} moving, {len(holding)} holding): IK solution '
+                             f'{tried} of {solutions.shape[0]}, {float(distance[k]):.2f} rad from the start, '
+                             f'{float(limit[k]):.2f} rad from the nearest limit')
+                    return result
+                log.warn(f'minimal_motion: IK solution {tried}: {getattr(result, "status", "no plan")}')
+            if solutions.shape[0] == 0:
+                log.warn('minimal_motion: the IK found no solution')
+        for attempt in range(2):
+            if (attempt or result is not None) and not hold.budget_left(self.node, started):
+                break
+            if criteria:
+                mp.update_tool_pose_criteria(criteria)
+            try:
+                planned = mp.plan_pose(goal, start_state, max_attempts=max_attempts)
+            finally:
+                if criteria:
+                    mp.update_tool_pose_criteria({f: ToolPoseCriteria() for f in criteria})
+            result = hold.finish(mp, planned, start_state, frozen, margin)
+            if minimal_motion.succeeded(result):
+                return result
+            log.warn(f'plan_pose ({len(moving)} moving, {len(holding)} holding), try {attempt + 1}: '
+                     f'{getattr(result, "status", "no plan")}')
+        return result
+
+    @staticmethod
+    def _per_frame_solutions(mp, poses, start_state, moving):
+        """[(distance, q)] nearest first: the IK solutions of each moving frame alone (the
+        other frames at their current pose, their joints at their start), up to
+        minimal_motion.MAX_CANDIDATES per frame, combined."""
+        joints = hold.frame_joints(mp)
+        frames = list(mp.tool_frames)
+        current = hold.current_poses(mp, start_state, frames)
+        dof = mp.kinematics.get_dof()
+        start = start_state.position.reshape(-1)[:dof]
+        per_frame = []
+        for f in moving:
+            others = [g for g in frames if g != f]
+            fixed = sorted({j for g in others for j in joints[g]})
+            goal = hold.goal(mp, {**{g: current[g] for g in others}, f: poses[f]})
+            solutions, distance, _ = minimal_motion.ik_solutions(mp, goal, start_state, fixed)
+            kept = [(solutions[k], float(distance[k]))
+                    for k in minimal_motion.nearest_first(solutions, distance)]
+            if not kept:
+                return []
+            per_frame.append(kept)
+        out = []
+        for choice in itertools.product(*per_frame):
+            q = start.clone()
+            for f, (solution, _) in zip(moving, choice):
+                q[joints[f]] = solution[joints[f]].to(q)
+            out.append((sum(d * d for _, d in choice) ** 0.5, q))
+        return sorted(out, key=lambda c: c[0])
 
     def _goal_per_tool_frame(self, goal_request, tool_frames):
         """One goal per tool frame (TrajectoryGeneration.target_tool_frames):

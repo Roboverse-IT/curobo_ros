@@ -24,13 +24,15 @@ MAX_CANDIDATES = 3
 SAME_SOLUTION = 0.05
 
 
-def ik_solutions(mp, goal, start_state):
+def ik_solutions(mp, goal, start_state, hold=()):
     """
     IK solutions of ``goal``: (solutions [N, dof], distance [N], margin [N]).
 
     The IK runs twice with its configured number of seeds (its own random ones,
     then seeds around the start), so its CUDA graph keeps its shape. ``distance``
-    is from the start, inf for a solution within LIMIT_MARGIN of a limit.
+    is from the start, inf for a solution within LIMIT_MARGIN of a limit. The
+    joints ``hold`` (planned-joint indices of the arms that hold, whose goal is
+    their current pose) keep their start values.
     """
     dof = mp.kinematics.get_dof()
     start = start_state.position.view(1, -1)[:, :dof]
@@ -49,6 +51,8 @@ def ik_solutions(mp, goal, start_state):
         solved = ik.solution.reshape(-1, ik.solution.shape[-1])[ik.success.view(-1)]
         found.append(solved[:, :dof])
     solutions = torch.cat(found)
+    if len(hold):
+        solutions[:, list(hold)] = start[:, list(hold)]
     # A joint with more than a full turn of range: the same angle on the turn
     # nearest the start, when that turn is inside the limits.
     turns = torch.round((start - solutions) / (2 * math.pi))
