@@ -188,9 +188,9 @@ class UnifiedPlannerNode(Node):
         # Seconds a plan (pose, joint-space or grasp) may take before no new attempt or
         # candidate starts; 0 = no limit. Keep it below the client's own timeout.
         self.declare_parameter('planning_time_budget', 0.0)
-        # Clearance (m) the check of a trajectory with a holding arm (planners/hold.py)
-        # asks between the robot's own links; 0 = no contact.
-        self.declare_parameter('self_collision_margin_m', 0.0)
+        # Robots with several tool frames: the smallest distance (m) between their arms
+        # along a plan (planners/hold.py, arm_gap); a closer plan fails. 0 = no check.
+        self.declare_parameter('arm_clearance_m', 0.0)
 
         # Single shared context for every solver (robot + obstacles + scene +
         # collision cache). The MPC solver is built lazily from this same context.

@@ -269,10 +269,15 @@ class GraspPlanner:
         return None, -1, f"Grasp planning failed after {attempts} attempt(s), last {message}"
 
     def _check_frames(self, legs, start_state, goal, goal_index, cand, grasping):
+        """_check per grasping frame, then the arm clearance (arm_clearance_m) over all legs."""
         for f in grasping:
             problem = self._check(legs, start_state, goal, goal_index, f, cand[f][goal_index])
             if problem is not None:
                 return f"{f}: {problem}"
+        clearance = hold.arm_clearance(self.node, self.motion_planner)
+        if clearance > 0.0 and legs:
+            q = torch.cat([q for leg in LEGS if leg in legs for _, q, _ in [legs[leg]]])
+            return hold.clearance_problem(self.motion_planner, q, clearance)
         return None
 
     def _goalset_frames(self, cand, grasping, g_count) -> GoalToolPose:
@@ -318,7 +323,6 @@ class GraspPlanner:
             return out
         planner = getattr(self.node, 'joint_space_motion_planner', None) or mp
         max_attempts = max(1, int(self.node.get_parameter('max_attempts').value))
-        clearance = float(self.node.get_parameter('self_collision_margin_m').value)
         failures = []
         for tried, k in enumerate(minimal_motion.nearest_first(solutions, distance, GRASP_TRIES), 1):
             if tried > 1 and not hold.budget_left(self.node, started):
@@ -327,7 +331,7 @@ class GraspPlanner:
             g = candidate[k]
             where = f"grasp candidate {g}, approach IK solution {tried} of {solutions.shape[0]}"
             legs = self._plan_legs_frames(planner, solutions[k], start_state, goal, g, cand, grasping,
-                                          holding, held_poses, frozen, max_attempts, clearance)
+                                          holding, held_poses, frozen, max_attempts)
             problem = legs if isinstance(legs, str) else self._check_frames(
                 self._legs(legs, goal), start_state, goal, g, cand, grasping)
             if problem is not None:
@@ -346,12 +350,12 @@ class GraspPlanner:
         return out
 
     def _plan_legs_frames(self, planner, q, start_state, goal, g, cand, grasping, holding,
-                          held_poses, frozen, max_attempts, clearance):
+                          held_poses, frozen, max_attempts):
         """APPROACH to ``q``, then the linear legs, each frozen and re-checked. The
         plan_grasp result fields, or what failed."""
         mp = self.motion_planner
         approach = hold.finish(mp, minimal_motion.plan_to(planner, q, start_state, max_attempts),
-                               start_state, frozen, clearance)
+                               start_state, frozen)
         if not minimal_motion.succeeded(approach):
             return f"approach leg failed ({getattr(approach, 'status', 'no joint-space plan')})"
         out = SimpleNamespace(success=torch.tensor([False]), status="", goalset_index=None)
@@ -366,15 +370,14 @@ class GraspPlanner:
             poses = {f: Pose.from_list(sum(self._targets(goal, g, f, cand[f][g])[leg], []))
                      for f in grasping}
             start = self._end(last)
-            result = self._linear_frames(poses, held_poses, axis, in_tool_frame, start, frozen,
-                                         clearance)
+            result = self._linear_frames(poses, held_poses, axis, in_tool_frame, start, frozen)
             if not minimal_motion.succeeded(result):
                 return f"{leg} leg failed ({getattr(result, 'status', None) or self._why(result)})"
             self._keep_plan(out, leg, result)
             last = result
         return out
 
-    def _linear_frames(self, poses, held_poses, axis, in_tool_frame, start, frozen, clearance):
+    def _linear_frames(self, poses, held_poses, axis, in_tool_frame, start, frozen):
         """Linear legs of the grasping frames in ``poses``, the frames in ``held_poses``
         weighted along the path; the holding joints frozen and the leg re-checked, with
         the grasp contact links out of collision as for the planning."""
@@ -387,7 +390,7 @@ class GraspPlanner:
         mp.disable_link_collision(links)
         try:
             planned = mp.plan_pose(hold.goal(mp, {**poses, **held_poses}), start)
-            return hold.finish(mp, planned, start, frozen, clearance)
+            return hold.finish(mp, planned, start, frozen)
         finally:
             mp.enable_link_collision(links)
             mp.update_tool_pose_criteria({f: ToolPoseCriteria() for f in criteria})

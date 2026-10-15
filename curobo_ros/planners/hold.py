@@ -13,7 +13,9 @@ holding arm drift by radians along the path. So a holding frame gets:
    included (``recheck``): the moving arms planned around a holding arm that may
    have drifted, and must not touch it where it really stays.
 
-A trajectory that fails the check counts as a failed attempt.
+A trajectory that fails the check is a failed plan. ``arm_gap`` measures how close
+the arms of a robot with several tool frames come along a trajectory
+(``arm_clearance_m``).
 """
 
 import time
@@ -124,19 +126,16 @@ def _self_cost(mp) -> SelfCollisionCost:
     return cost
 
 
-def recheck(mp, q, margin=0.0):
+def recheck(mp, q):
     """
     None when the joint trajectory ``q`` [T, dof] adds no contact over its first
-    waypoint, else what it hits: self collision (the robot's collision pairs, the
-    spheres grown by ``margin``) and the world, with what the robot holds attached.
+    waypoint, else what it hits: self collision (the robot's collision pairs) and the
+    world, with what the robot holds attached.
     """
     kin = mp.kinematics
     q = q.reshape(-1, kin.get_dof()).contiguous()
     state = kin.compute_kinematics(JointState.from_position(q, joint_names=kin.joint_names))
     spheres = state.robot_spheres.reshape(1, q.shape[0], -1, 4).clone()
-    if margin > 0.0:
-        live = spheres[..., 3] > 0
-        spheres[..., 3] = torch.where(live, spheres[..., 3] + margin / 2.0, spheres[..., 3])
     cost = _self_cost(mp)
     cost.setup_batch_tensors(1, q.shape[0])
     self_depth = cost.forward(spheres).reshape(-1)
@@ -181,7 +180,7 @@ def failed(status):
     return SimpleNamespace(success=torch.tensor([False]), status=status)
 
 
-def finish(mp, result, start_state, hold, margin=0.0):
+def finish(mp, result, start_state, hold):
     """
     The plan ``result`` with the joints ``hold`` frozen and re-checked: a ``Held``
     result, the failed ``result`` as it is, or a failed result saying why.
@@ -195,33 +194,72 @@ def finish(mp, result, start_state, hold, margin=0.0):
     names = list(trajectory.joint_names) if trajectory.joint_names is not None else list(kin.joint_names)
     columns = [names.index(n) for n in kin.joint_names]
     q = trajectory.position.reshape(-1, trajectory.position.shape[-1])[:, columns]
-    problem = recheck(mp, q, margin)
+    problem = recheck(mp, q)
     if problem is not None:
         return failed(f"holding arm re-check: {problem}")
     return Held(result, trajectory)
 
 
-def end_state(mp, result) -> JointState:
-    """The last waypoint of a plan's interpolated trajectory, on the planned joints."""
+def _arm_pairs(mp):
+    """Sphere pairs [P, 2] of the robot's self-collision pairs whose spheres belong to two
+    different tool frames' arms (a sphere belongs to the arm whose joints move it), cached."""
+    cached = getattr(mp, '_curobo_ros_arm_pairs', None)
+    if cached is not None:
+        return cached
     kin = mp.kinematics
-    plan = result.get_interpolated_plan()
-    names = list(plan.joint_names) if plan.joint_names is not None else list(kin.joint_names)
-    last = plan.position.reshape(-1, plan.position.shape[-1])[-1:]
-    columns = [names.index(n) for n in kin.joint_names]
-    return JointState.from_position(last[:, columns].clone(), joint_names=list(kin.joint_names))
+    dof = kin.get_dof()
+    q0 = kin.default_joint_state.position.reshape(1, -1)[:, :dof].clone()
+
+    def centres(q):
+        s = kin.compute_kinematics(JointState.from_position(q, joint_names=kin.joint_names)).robot_spheres
+        return s.reshape(-1, 4)[:, :3].clone()
+
+    c0 = centres(q0)
+    arm = torch.full((c0.shape[0],), -1, dtype=torch.long, device=c0.device)
+    for k, joints in enumerate(frame_joints(mp).values()):
+        q = q0.clone()
+        q[0, joints] += PROBE
+        arm[(centres(q) - c0).norm(dim=-1) > 1e-6] = k
+    pairs = kin.get_self_collision_config().collision_pairs.long().to(c0.device)
+    a, b = arm[pairs[:, 0]], arm[pairs[:, 1]]
+    out = pairs[(a >= 0) & (b >= 0) & (a != b)]
+    mp._curobo_ros_arm_pairs = out
+    return out
 
 
-def joined(results):
-    """One successful result whose interpolated trajectory is ``results``' trajectories one
-    after the other (each starts where the previous one ends: its first waypoint is dropped)."""
-    plans = [r.get_interpolated_plan() for r in results]
-    out = plans[0].clone()
-    for field in ('position', 'velocity', 'acceleration', 'jerk'):
-        parts = [getattr(p, field, None) for p in plans]
-        if any(x is None for x in parts):
-            continue
-        setattr(out, field, torch.cat([parts[0]] + [x[..., 1:, :] for x in parts[1:]], dim=-2))
-    return Held(results[0], out)
+def arm_gap(mp, q):
+    """Smallest distance (m) between the spheres of two different arms along the joint
+    trajectory ``q`` [T, dof] (attached objects included), over the robot's self-collision
+    pairs; None on a robot with one tool frame."""
+    if len(mp.tool_frames) < 2:
+        return None
+    pairs = _arm_pairs(mp)
+    if pairs.shape[0] == 0:
+        return None
+    kin = mp.kinematics
+    q = q.reshape(-1, kin.get_dof()).contiguous()
+    s = kin.compute_kinematics(JointState.from_position(q, joint_names=kin.joint_names)).robot_spheres
+    s = s.reshape(q.shape[0], -1, 4)
+    a, b = s[:, pairs[:, 0]], s[:, pairs[:, 1]]
+    gap = (a[..., :3] - b[..., :3]).norm(dim=-1) - a[..., 3] - b[..., 3]
+    live = (a[..., 3] > 0) & (b[..., 3] > 0)
+    gap = torch.where(live, gap, torch.full_like(gap, float('inf')))
+    return float(gap.min())
+
+
+def arm_clearance(node, mp) -> float:
+    """``arm_clearance_m`` on a robot with several tool frames, else 0 (no check)."""
+    if len(mp.tool_frames) < 2 or not node.has_parameter('arm_clearance_m'):
+        return 0.0
+    return float(node.get_parameter('arm_clearance_m').value)
+
+
+def clearance_problem(mp, q, clearance):
+    """What is wrong with ``q`` [T, dof] for a clearance > 0 between the arms, or None."""
+    gap = arm_gap(mp, q)
+    if gap is None or gap >= clearance:
+        return None
+    return f"the arms come {gap * 1000:.0f} mm apart, arm_clearance_m is {clearance * 1000:.0f} mm"
 
 
 def budget_left(node, started):

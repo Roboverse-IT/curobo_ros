@@ -26,6 +26,7 @@ from curobo.motion_planner import MotionPlanner
 # Not re-exported publicly yet, so import from _src (same pattern as Mapper).
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
+from . import hold
 from .trajectory_planner import TrajectoryPlanner, PlannerResult, ExecutionMode
 from curobo_msgs.action import SendTrajectory
 
@@ -284,6 +285,15 @@ class SinglePlanner(TrajectoryPlanner):
                 self.planned_trajectory,
                 config
             )
+
+            # A robot with several tool frames: how close its arms come (arm_clearance_m,
+            # 0 = no check at all).
+            clearance = hold.arm_clearance(self.node, self.motion_planner)
+            if clearance > 0.0:
+                problem = hold.clearance_problem(
+                    self.motion_planner, self.planned_trajectory.position, clearance)
+                if problem is not None:
+                    return PlannerResult(success=False, message=f"Planning failed: {problem}")
 
             # v2: position shape can be [B, T, D] — count waypoints on horizon dim.
             _pos = self.planned_trajectory.position

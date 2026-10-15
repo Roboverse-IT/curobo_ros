@@ -9,8 +9,6 @@ v2 notes:
   enable_graph/enable_opt — those tunables live on the trajopt YAML.
 """
 
-import time
-
 import torch
 from curobo.types import JointState
 
@@ -88,18 +86,12 @@ class JointSpacePlanner(SinglePlanner):
 
         holding = list(getattr(goal_request, 'hold_tool_frames', None) or [])
         if not holding:
-            started = time.monotonic()
-            result = self.motion_planner.plan_cspace(
+            return self.motion_planner.plan_cspace(
                 goal_state,
                 start_state,
                 max_attempts=max_attempts,
                 enable_graph_attempt=enable_graph_attempt,
             )
-            if len(self.motion_planner.tool_frames) > 1 and not (
-                    result is not None and bool(result.success.view(-1)[0])) and hold.budget_left(
-                    self.node, started):
-                return self._via_default(goal_state, start_state, max_attempts, enable_graph_attempt, result)
-            return result
         # Arms that hold (planners/hold.py): target joints equal to the start ones,
         # frozen along the plan, then the plan re-checked.
         mp = self.motion_planner
@@ -110,44 +102,6 @@ class JointSpacePlanner(SinglePlanner):
                  if abs(goal_joint_positions[j] - float(start[j])) > SAME_JOINT]
         if moved:
             raise ValueError(f"hold_tool_frames {holding}: the target moves their joints {moved}")
-        margin = float(self.node.get_parameter('self_collision_margin_m').value)
-        started = time.monotonic()
-        result = None
-        for attempt in range(2):
-            if attempt and not hold.budget_left(self.node, started):
-                break
-            result = hold.finish(mp, mp.plan_cspace(goal_state, start_state, max_attempts=max_attempts,
-                                                    enable_graph_attempt=enable_graph_attempt),
-                                 start_state, frozen, margin)
-            if result is not None and bool(result.success.view(-1)[0]):
-                return result
-            self.node.get_logger().warn(
-                f"joint-space plan, {len(holding)} frame(s) holding, try {attempt + 1}: "
-                f"{getattr(result, 'status', 'no plan')}")
-        return result
-
-    def _via_default(self, goal_state, start_state, max_attempts, enable_graph_attempt, failed):
-        """
-        Several tool frames: a long joint-space move fails from some configurations
-        (cuRobo v0.8.0, measured on a dual-arm AMR: ~10-20% of the returns from both
-        chests). Through the robot's default configuration it plans in most of them:
-        two plans, one trajectory. Returns ``failed`` when either leg fails.
-        """
-        mp = self.motion_planner
-        kin = mp.kinematics
-        via = JointState.from_position(
-            kin.default_joint_state.position.reshape(1, -1)[:, :kin.get_dof()].clone().to(
-                start_state.position),
-            joint_names=list(kin.joint_names))
-        first = mp.plan_cspace(via, start_state, max_attempts=max_attempts,
-                               enable_graph_attempt=enable_graph_attempt)
-        if first is None or not bool(first.success.view(-1)[0]):
-            self.node.get_logger().warn("joint-space plan failed, and so did the leg to the default configuration")
-            return failed
-        second = mp.plan_cspace(goal_state, hold.end_state(mp, first), max_attempts=max_attempts,
-                                enable_graph_attempt=enable_graph_attempt)
-        if second is None or not bool(second.success.view(-1)[0]):
-            self.node.get_logger().warn("joint-space plan failed, and so did the leg from the default configuration")
-            return failed
-        self.node.get_logger().info("joint-space plan through the default configuration (direct plan failed)")
-        return hold.joined([first, second])
+        return hold.finish(mp, mp.plan_cspace(goal_state, start_state, max_attempts=max_attempts,
+                                              enable_graph_attempt=enable_graph_attempt),
+                           start_state, frozen)
