@@ -160,6 +160,42 @@ def recheck(mp, q):
     return None
 
 
+def contacts(mp, q):
+    """
+    What the configurations ``q`` [N, dof] touch, with the planner's own model and what
+    the robot holds attached: per row "clear", or the deepest world contact (and the link
+    it is on) and self collision.
+    """
+    kin = mp.kinematics
+    q = q.reshape(-1, kin.get_dof()).contiguous()
+    state = kin.compute_kinematics(JointState.from_position(q, joint_names=kin.joint_names))
+    cost = _self_cost(mp)
+    cost.setup_batch_tensors(1, q.shape[0])
+    self_depth = cost.forward(state.robot_spheres.reshape(1, q.shape[0], -1, 4).clone()).reshape(-1)
+    world = None
+    checker = getattr(mp, 'scene_collision_checker', None)
+    if checker is not None and hasattr(checker, 'get_sphere_distance'):
+        device_cfg = DeviceCfg(device=q.device, dtype=q.dtype)
+        world = checker.get_sphere_distance(
+            state, CollisionBuffer.from_shape(state.robot_spheres.shape, device_cfg),
+            device_cfg.to_device([1.0]), activation_distance=device_cfg.to_device([0.0]))
+        world = world.reshape(q.shape[0], -1)
+    kc = kin.kinematics_config
+    names = {i: n for n, i in kc.link_name_to_idx_map.items()}
+    links = kc.link_sphere_idx_map.reshape(-1) if kc.link_sphere_idx_map is not None else None
+    out = []
+    for t in range(q.shape[0]):
+        parts = []
+        if world is not None and float(world[t].max()) > 0.0:
+            s = int(world[t].argmax())
+            link = names.get(int(links[s]), f"sphere {s}") if links is not None else f"sphere {s}"
+            parts.append(f"world contact {float(world[t, s]) * 1000:.1f} mm on {link}")
+        if float(self_depth[t]) > 0.0:
+            parts.append(f"self collision {float(self_depth[t]) * 1000:.1f} mm")
+        out.append(", ".join(parts) or "clear")
+    return out
+
+
 class Held:
     """A successful plan result with the holding joints frozen in its interpolated
     trajectory; every other attribute is the original result's."""

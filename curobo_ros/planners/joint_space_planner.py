@@ -86,12 +86,12 @@ class JointSpacePlanner(SinglePlanner):
 
         holding = list(getattr(goal_request, 'hold_tool_frames', None) or [])
         if not holding:
-            return self.motion_planner.plan_cspace(
+            return self._explain(self.motion_planner.plan_cspace(
                 goal_state,
                 start_state,
                 max_attempts=max_attempts,
                 enable_graph_attempt=enable_graph_attempt,
-            )
+            ), start_state, goal_state)
         # Arms that hold (planners/hold.py): target joints equal to the start ones,
         # frozen along the plan, then the plan re-checked.
         mp = self.motion_planner
@@ -102,6 +102,22 @@ class JointSpacePlanner(SinglePlanner):
                  if abs(goal_joint_positions[j] - float(start[j])) > SAME_JOINT]
         if moved:
             raise ValueError(f"hold_tool_frames {holding}: the target moves their joints {moved}")
-        return hold.finish(mp, mp.plan_cspace(goal_state, start_state, max_attempts=max_attempts,
-                                              enable_graph_attempt=enable_graph_attempt),
-                           start_state, frozen)
+        return self._explain(
+            hold.finish(mp, mp.plan_cspace(goal_state, start_state, max_attempts=max_attempts,
+                                           enable_graph_attempt=enable_graph_attempt),
+                        start_state, frozen), start_state, goal_state)
+
+    def _explain(self, result, start_state, goal_state):
+        """A failed cspace result without a status (cuRobo's has none) says what its start
+        and goal touch."""
+        if result is None or bool(result.success.view(-1)[0]) or getattr(result, 'status', None):
+            return result
+        try:
+            dof = self.motion_planner.kinematics.get_dof()
+            q = torch.cat([start_state.position.reshape(1, -1)[:, :dof],
+                           goal_state.position.reshape(1, -1)[:, :dof].to(start_state.position)])
+            start, goal = hold.contacts(self.motion_planner, q)
+            result.status = f"no joint-space plan (start {start}; goal {goal})"
+        except Exception as error:  # the diagnosis must not hide the failure
+            self.node.get_logger().warn(f"could not check the start and goal: {error}")
+        return result
