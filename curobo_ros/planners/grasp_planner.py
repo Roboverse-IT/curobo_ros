@@ -553,8 +553,11 @@ class GraspPlanner:
                 lateral = math.sqrt(max(0.0, sum(r * r for r in rel) - along * along))
                 beyond = max(0.0, -along, along - length)
                 if lateral > line_tol or beyond > line_tol:
+                    previous = targets[LEGS[LEGS.index(leg) - 1]][0]
                     return (f"{leg} leg leaves its line by "
-                            f"{max(lateral, beyond) * 1000:.1f} mm")
+                            f"{max(lateral, beyond) * 1000:.1f} mm "
+                            f"({'sideways' if lateral >= beyond else 'past its ends'}; it starts "
+                            f"{math.dist(a, previous) * 1000:.1f} mm from its start pose)")
                 if _angle(quat, goal_q) > rot_tol:
                     return (f"{leg} leg turns the tool "
                             f"{math.degrees(_angle(quat, goal_q)):.1f} deg on the way")
