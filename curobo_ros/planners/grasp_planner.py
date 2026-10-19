@@ -86,7 +86,9 @@ class GraspPlanner:
         frames = list(mp.tool_frames)
         if len(frames) != 1:
             return self._plan_frames(start_state, goal)
-        if goal.grasp_tool_frames or goal.hold_tool_frames:
+        # Naming the only tool frame (a station built for several arms running one) is the
+        # plain request; anything else needs a robot with more than one.
+        if goal.hold_tool_frames or set(goal.grasp_tool_frames) - set(frames):
             raise ValueError(
                 f"grasp_tool_frames and hold_tool_frames are for a robot with more than one "
                 f"tool frame, this one has {frames}")
