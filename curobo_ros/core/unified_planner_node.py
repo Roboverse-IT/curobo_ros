@@ -180,6 +180,9 @@ class UnifiedPlannerNode(Node):
         self.declare_parameter('grasp_position_tolerance', 0.005)
         self.declare_parameter('grasp_orientation_tolerance', 0.05)
         self.declare_parameter('grasp_line_tolerance', 0.005)
+        # How hard GRASP and LIFT are held on their line: cuRobo's weight on the off-line
+        # directions along the leg (linear_motion's non_terminal_scale).
+        self.declare_parameter('grasp_line_weight', 1.0)
         # How a pose goal (classic planner) and the grasp approach pick their joint
         # configuration: 'planner' takes whichever IK solution cuRobo converges to;
         # 'minimal_motion' takes the IK solution nearest the start, clear of the

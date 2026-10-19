@@ -385,8 +385,9 @@ class GraspPlanner:
         the grasp contact links out of collision as for the planning."""
         mp = self.motion_planner
         links = mp.kinematics.config.kinematics_config.grasp_contact_link_names or []
+        weight = float(self.node.get_parameter('grasp_line_weight').value)
         criteria = {f: ToolPoseCriteria.linear_motion(
-            axis=axis, non_terminal_scale=1.0, project_distance_to_goal=in_tool_frame) for f in poses}
+            axis=axis, non_terminal_scale=weight, project_distance_to_goal=in_tool_frame) for f in poses}
         criteria.update({f: hold.held() for f in held_poses})
         mp.update_tool_pose_criteria(criteria)
         mp.disable_link_collision(links)
@@ -429,8 +430,9 @@ class GraspPlanner:
         linear-motion criteria, the grasp contact links out of collision."""
         mp = self.motion_planner
         links = mp.kinematics.config.kinematics_config.grasp_contact_link_names or []
+        weight = float(self.node.get_parameter('grasp_line_weight').value)
         mp.update_tool_pose_criteria({frame: ToolPoseCriteria.linear_motion(
-            axis=axis, non_terminal_scale=1.0, project_distance_to_goal=in_tool_frame)})
+            axis=axis, non_terminal_scale=weight, project_distance_to_goal=in_tool_frame)})
         mp.disable_link_collision(links)
         try:
             return mp.plan_pose(GoalToolPose.from_poses(
@@ -528,6 +530,7 @@ class GraspPlanner:
         line_tol = float(self.node.get_parameter('grasp_line_tolerance').value)
         targets = self._targets(goal, goal_index, frame, candidate)
         previous_end = start_state.position.reshape(-1)[: self.motion_planner.kinematics.get_dof()]
+        off_line = 0.0
         for leg in LEGS:
             if leg not in legs:
                 continue
@@ -549,20 +552,24 @@ class GraspPlanner:
             axis = [g - s for g, s in zip(goal_p, a)]
             length = math.sqrt(sum(v * v for v in axis)) or 1.0
             u = [v / length for v in axis]
+            lateral = beyond = 0.0
             for p, quat in zip(positions, quaternions):
                 rel = [x - s for x, s in zip(p, a)]
                 along = sum(r * k for r, k in zip(rel, u))
-                lateral = math.sqrt(max(0.0, sum(r * r for r in rel) - along * along))
-                beyond = max(0.0, -along, along - length)
-                if lateral > line_tol or beyond > line_tol:
-                    previous = targets[LEGS[LEGS.index(leg) - 1]][0]
-                    return (f"{leg} leg leaves its line by "
-                            f"{max(lateral, beyond) * 1000:.1f} mm "
-                            f"({'sideways' if lateral >= beyond else 'past its ends'}; it starts "
-                            f"{math.dist(a, previous) * 1000:.1f} mm from its start pose)")
+                lateral = max(lateral, math.sqrt(max(0.0, sum(r * r for r in rel) - along * along)))
+                beyond = max(beyond, -along, along - length)
                 if _angle(quat, goal_q) > rot_tol:
                     return (f"{leg} leg turns the tool "
                             f"{math.degrees(_angle(quat, goal_q)):.1f} deg on the way")
+            off_line = max(off_line, lateral, beyond)
+            if lateral > line_tol or beyond > line_tol:
+                previous = targets[LEGS[LEGS.index(leg) - 1]][0]
+                return (f"{leg} leg leaves its line by up to "
+                        f"{max(lateral, beyond) * 1000:.1f} mm "
+                        f"({'sideways' if lateral >= beyond else 'past its ends'}; it starts "
+                        f"{math.dist(a, previous) * 1000:.1f} mm from its start pose)")
+        self.node.get_logger().info(
+            f"{frame}: linear legs at most {off_line * 1000:.1f} mm off their line")
         return None
 
     # ------------------------------------------------------------------
