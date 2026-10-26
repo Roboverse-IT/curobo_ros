@@ -126,8 +126,6 @@ class ObstacleManager:
         self._mapper_extent_xyz = self._declare_param('mapper_extent_xyz', [2.0, 2.0, 2.0])
         self._mapper_grid_center = self._declare_param('mapper_grid_center', [0.0, 0.0, 0.0])
         self._mapper_voxel_size = self._declare_param('mapper_voxel_size', 0.02)
-        self._mapper_image_height = self._declare_param('mapper_image_height', 480)
-        self._mapper_image_width = self._declare_param('mapper_image_width', 640)
         self._mapper_depth_min = self._declare_param('mapper_depth_min', 0.1)
         self._mapper_depth_max = self._declare_param('mapper_depth_max', 5.0)
         # ESDF voxel size shares the pre-existing `voxel_size` param.
@@ -137,26 +135,36 @@ class ObstacleManager:
         # when cameras are added/removed or their frame rate changes — see
         # _resolve_time_decay. <= 0 disables the decay entirely.
         self._decay_half_life_s = self._declare_param('decay_half_life_s', 0.7)
-        self._warn_removed_decay_factor()
+        self._warn_removed_params()
 
-    def _warn_removed_decay_factor(self):
-        """Flag a leftover `decay_factor` override from a pre-normalisation launch.
+    # Removed parameters and what replaced them.
+    REMOVED_PARAMS = {
+        'decay_factor': (
+            "the TSDF decay is now derived from 'decay_half_life_s' (seconds) and "
+            "the cameras' frame_rate_hz. Remove it and set 'decay_half_life_s' "
+            'instead.'),
+        'mapper_image_width': (
+            'the Mapper takes each depth frame at its own size, nothing is '
+            'resized. Remove it.'),
+        'mapper_image_height': (
+            'the Mapper takes each depth frame at its own size, nothing is '
+            'resized. Remove it.'),
+    }
+
+    def _warn_removed_params(self):
+        """Flag leftover overrides of removed parameters from an older launch.
 
         rclpy silently keeps overrides for parameters that are never declared, so
         a stale `decay_factor: 0.9` in a launch file would be dropped without a
         word while the operator believes it is still tuning the decay.
         """
-        try:
-            overrides = self.node.get_node_options().parameter_overrides
-        except Exception:
-            return
-        if any(p.name == 'decay_factor' for p in overrides):
+        # rclpy has no public getter for the overrides (Node has no
+        # get_node_options()); they are kept in this dict, name -> Parameter.
+        overrides = getattr(self.node, '_parameter_overrides', {})
+        for name in sorted(overrides.keys() & self.REMOVED_PARAMS.keys()):
             self.node.get_logger().warn(
-                "Parameter 'decay_factor' is set but no longer exists: the TSDF "
-                "decay is now derived from 'decay_half_life_s' (seconds) and the "
-                "cameras' frame_rate_hz. The provided value is IGNORED - remove "
-                "it and set 'decay_half_life_s' instead."
-            )
+                f"Parameter '{name}' is set but no longer exists, the provided "
+                f'value is IGNORED: {self.REMOVED_PARAMS[name]}')
 
     # ---- Observer wiring (propagation to solvers) ----
 
@@ -264,8 +272,8 @@ class ObstacleManager:
         # num_cameras is the per-integrate batch size. Each camera strategy
         # integrates ONE frame per ROS callback, so the Mapper is built for a
         # single-camera frame; multiple cameras simply call integrate() in turn
-        # and the shared TSDF fuses them. (All cameras must share image_height/
-        # image_width since the projective buffer is sized once here.)
+        # and the shared TSDF fuses them. The Mapper takes each frame at its own
+        # size, so cameras of different resolutions can share it.
         time_decay = self._resolve_time_decay(total_frame_rate_hz)
         self.mapper = Mapper(MapperCfg(
             extent_meters_xyz=tuple(self._mapper_extent_xyz),
@@ -275,8 +283,6 @@ class ObstacleManager:
             voxel_size=self._mapper_voxel_size,
             esdf_voxel_size=self._esdf_voxel_size,
             grid_center=torch.tensor(self._mapper_grid_center, dtype=torch.float32),
-            image_height=self._mapper_image_height,
-            image_width=self._mapper_image_width,
             depth_minimum_distance=self._mapper_depth_min,
             depth_maximum_distance=self._mapper_depth_max,
             # decay_factor defaults to 1.0, meaning NO decay: occupancy then
@@ -294,7 +300,6 @@ class ObstacleManager:
         self.node.get_logger().info(
             f"Mapper configured: extent={self._mapper_extent_xyz}m, "
             f"tsdf={self._mapper_voxel_size}m, esdf={self._esdf_voxel_size}m, "
-            f"image={self._mapper_image_width}x{self._mapper_image_height} "
             f"({int(num_cameras)} camera(s) feeding the shared TSDF), "
             f"decay: half_life={self._decay_half_life_s}s @ R={total_frame_rate_hz}Hz "
             f"-> time_decay={time_decay:.4f}"

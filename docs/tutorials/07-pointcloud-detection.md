@@ -66,7 +66,7 @@ Camera intrinsics from topic: fx=...        # or: Using static extrinsics from c
 DepthMap camera initialized with depth topic: /depth_to_rgb/image_raw
 ```
 
-Relevant perception parameters (see [Parameters](../concepts/parameters.md)): `mapper_extent_xyz` (perception volume), `voxel_size`, `mapper_image_width`/`mapper_image_height` (frames are resized to this before integration), `decay_half_life_s`.
+Relevant perception parameters (see [Parameters](../concepts/parameters.md)): `mapper_extent_xyz` (perception volume), `voxel_size`, `decay_half_life_s`. Depth frames are integrated at their own size; cameras of different resolutions can feed the same Mapper.
 
 ## 3. Verify obstacles are seen
 

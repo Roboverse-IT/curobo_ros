@@ -70,11 +70,12 @@ Declared by the obstacle manager; all are startup/build-time.
 | `mapper_extent_xyz` | `[2.0, 2.0, 2.0]` | Perception volume (m) around `mapper_grid_center` |
 | `mapper_grid_center` | `[0, 0, 0]` | Centre of the perception volume (robot base frame) |
 | `mapper_voxel_size` | `0.02` | Internal TSDF voxel size (m) |
-| `mapper_image_width` / `mapper_image_height` | `640` / `480` (launch file passes `1280`/`720`) | Depth-projection resolution; every depth frame is resized to this before integration |
 | `mapper_depth_min` / `mapper_depth_max` | `0.1` / `5.0` | Depth clipping range (m) |
 | `decay_half_life_s` | `0.7` | Half-life (s) of stale voxels. Replaces the removed `decay_factor` parameter |
 | `collision_cache_cuboid` / `collision_cache_mesh` | `100` / `100` | Cuboid and mesh slots the solvers are built for. Every slot costs plan time whether used or not (on a Jetson AGX Orin 100 + 100 made plans 3.5x slower than 10 + 1); size them to the largest world you load. `set_collision_cache` still changes them at runtime |
 | `collision_cache_voxel` | `true` | Build the solvers with the voxel (ESDF) layer, sized by `mapper_extent_xyz` and `voxel_size`; `false` for a static world without perception |
+
+The Mapper integrates each depth frame at its own size. The former `mapper_image_width` / `mapper_image_height` parameters are removed; a launch that still sets them, or `decay_factor`, gets a warning at startup and the value is ignored.
 
 ## Node parameters — MPC (reactive control)
 
