@@ -647,20 +647,17 @@ class ObstacleManager:
         # CuRobo v2 (v0.8): the method lives on the ESDF integrator
         # (mapper.integrator -> BlockSparseESDFIntegrator), NOT on the Mapper.
         #
-        # It returns a single OccupiedVoxels dataclass, NOT the (centers, colors)
-        # tuple a previous comment here claimed. Unpacking it raised "cannot
-        # unpack non-iterable OccupiedVoxels object" -- and because this block is
-        # wrapped in try/except, the failure only WARNed: the grid silently kept
-        # the analytic primitives and dropped every camera-observed obstacle.
-        # Read .centers explicitly so an API change breaks loudly instead.
-        # (OccupiedVoxels also defines __len__ and carries block_idx_per_voxel /
-        # block_data / optional texture_* fields, see mapper/storage.py:370.)
+        # In cuRobo v0.8.0 (the pinned version) it returns a (centers, colors)
+        # tuple, (None, None) when empty; there is no OccupiedVoxels class
+        # (integrator_esdf.py:549). This block is wrapped in try/except, so a
+        # wrong return type only WARNs and the grid silently drops every
+        # camera-observed obstacle: test_obstacle_manager_perception covers it.
         #   centers: (N, 3) float32, world positions of voxels with SDF <= 0.
         mapper = getattr(node, 'mapper', None)
         if mapper is not None:
             try:
-                occupied = mapper.integrator.extract_occupied_voxels(surface_only=False)
-                centers = occupied.centers
+                centers, _colors = mapper.integrator.extract_occupied_voxels(
+                    surface_only=False)
                 n_occ = 0 if centers is None else int(centers.shape[0])
                 if n_occ:
                     world_xyz = centers.detach().cpu().numpy()  # [N, 3] world

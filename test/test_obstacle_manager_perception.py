@@ -2,6 +2,7 @@
 
 from curobo.types import CameraObservation, DeviceCfg, Pose
 from curobo_ros.core.obstacle_manager import ObstacleManager
+import numpy as np
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
@@ -20,6 +21,9 @@ class Logger:
         self.warnings.append(message)
 
     def info(self, message, **kwargs):
+        pass
+
+    def debug(self, message, **kwargs):
         pass
 
 
@@ -67,6 +71,24 @@ def test_one_mapper_takes_depth_frames_of_any_size(make_node):
     assert stats['frame_count'] == 3
     assert stats['active_blocks'] > 0
     assert stats['allocation_failures'] == 0
+
+
+def test_voxel_grid_contains_the_camera_voxels(make_node):
+    """A depth frame of a plane 0.8 m below a camera at 1 m fills the grid layer at z=0.2 m."""
+    node, logger = make_node()
+    manager = ObstacleManager(node, None)
+    manager.setup_perception(num_cameras=1, total_frame_rate_hz=30.0)
+    node.mapper.integrate(observation(480, 640))
+    torch.cuda.synchronize()
+
+    voxel_size = 0.05
+    voxel_grid, grid_min, size = manager._compute_dense_voxel_grid(node, voxel_size)
+
+    assert logger.warnings == []
+    occupied = np.argwhere(voxel_grid)
+    assert len(occupied) > 0
+    z = grid_min[2] + (occupied[:, 2] + 0.5) * voxel_size
+    assert abs(float(np.median(z)) - 0.2) <= voxel_size
 
 
 def test_removed_parameters_are_reported(make_node):
