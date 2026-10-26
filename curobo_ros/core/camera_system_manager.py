@@ -1,5 +1,6 @@
 from curobo.config_io import load_yaml
 from curobo_ros.cameras.camera_context import CameraContext
+from curobo_ros.cameras.camera_depth_map_strategy import DEFAULT_TF_WAIT_MAX_S
 
 # Assumed rate for a camera whose YAML omits `frame_rate_hz`.
 # Deliberately HIGH: this value normalizes the TSDF decay (see
@@ -64,6 +65,7 @@ class CameraSystemManager:
                     camera_intrinsics = camera.get("intrinsics", None)
                     camera_extrinsics = camera.get("extrinsics", None)
                     camera_frame_rate = self._parse_frame_rate(camera, camera_name)
+                    camera_tf_wait = camera.get('tf_wait_max_s', DEFAULT_TF_WAIT_MAX_S)
 
                     # Add camera with appropriate type
                     self.camera_context.add_camera(
@@ -74,7 +76,8 @@ class CameraSystemManager:
                         frame_id=camera_frame_id,
                         intrinsics=camera_intrinsics,
                         extrinsics=camera_extrinsics,
-                        frame_rate_hz=camera_frame_rate
+                        frame_rate_hz=camera_frame_rate,
+                        tf_wait_max_s=camera_tf_wait
                     )
 
                 self.node.get_logger().info(f"Successfully loaded {len(camera_config['cameras'])} camera(s)")

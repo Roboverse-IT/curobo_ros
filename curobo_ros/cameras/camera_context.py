@@ -3,7 +3,8 @@
 from typing import List, Dict
 import torch
 from curobo_ros.cameras.camera_strategy import CameraStrategy
-from curobo_ros.cameras.camera_depth_map_strategy import DepthMapCameraStrategy
+from curobo_ros.cameras.camera_depth_map_strategy import (
+    DEFAULT_TF_WAIT_MAX_S, DepthMapCameraStrategy)
 
 
 class CameraContext:
@@ -32,7 +33,8 @@ class CameraContext:
         self._device = torch.device('cuda')
 
     def add_camera(self, camera_name, camera_type, topic, camera_info, frame_id,
-                   intrinsics=None, extrinsics=None, frame_rate_hz=None, **kwargs):
+                   intrinsics=None, extrinsics=None, frame_rate_hz=None,
+                   tf_wait_max_s=DEFAULT_TF_WAIT_MAX_S, **kwargs):
         """
         Add a camera strategy to the context.
 
@@ -46,6 +48,8 @@ class CameraContext:
             extrinsics: Optional camera extrinsics from config (list)
             frame_rate_hz: Declared publication rate of `topic`, in Hz. Only used
                 to normalise the TSDF decay (see get_total_frame_rate_hz).
+            tf_wait_max_s: How long a depth frame waits for the TF at its stamp
+                (see DepthMapCameraStrategy).
             **kwargs: Additional parameters for specific camera strategies
         """
         # v2 perception ingests depth+rgb images through the Mapper TSDF; raw
@@ -61,7 +65,8 @@ class CameraContext:
                 camera_info_topic=camera_info_topic,
                 frame_id=frame_id,
                 intrinsics=intrinsics,
-                extrinsics=extrinsics
+                extrinsics=extrinsics,
+                tf_wait_max_s=tf_wait_max_s
             )
 
         else:

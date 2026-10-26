@@ -30,3 +30,8 @@ cameras:
     # If this field is missing, a conservative default is used and a warning is
     # logged at startup.
     frame_rate_hz: 30.0
+    # TF mode only: how long (s) a depth frame may wait for the TF at its stamp
+    # when it arrives before that TF (the next TF sample comes at most one TF
+    # publish period later). It is dropped after that; 0 = drop at once.
+    # Default 0.05, enough for TF published at 20 Hz or faster.
+    tf_wait_max_s: 0.05

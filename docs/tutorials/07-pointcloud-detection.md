@@ -36,12 +36,15 @@ cameras:
     # [x, y, z, qw, qx, qy, qz] camera pose in the robot base frame;
     # [] = look it up from TF (base frame -> frame_id) at each image's stamp
     frame_rate_hz: 30.0                     # declared publication rate (drives decay)
+    tf_wait_max_s: 0.05                     # TF mode: max wait for the TF at the image stamp
 ```
 
 Two decisions per camera:
 
 - **Intrinsics** — leave `[]` to read them once from the `camera_info` topic at startup, or hardcode the 9-element K matrix.
 - **Extrinsics** — hardcode the 7-element pose (recommended once calibrated), or leave `[]` to resolve TF `base frame → frame_id` at each image's `header.stamp` (the acquisition time, so a moving camera is posed where it was when the image was taken). With TF, frames are **dropped** when the transform at that stamp is unavailable or the stamp is zero — there is no identity-pose or latest-transform fallback.
+
+A depth image often arrives before the TF at its stamp (the next TF sample is up to one TF publish period away). Such a frame waits, at most `tf_wait_max_s` (default 0.05 s, enough for TF at 20 Hz or faster), and is integrated as soon as that TF arrives; only the newest frame waits, an older one still waiting when the next arrives is dropped. `0` drops it at once.
 
 `frame_id` is required and must equal the `header.frame_id` of the depth images: frames from any other frame are dropped with an error, because they would be projected with the wrong pose.
 
