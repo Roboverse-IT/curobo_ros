@@ -35,6 +35,7 @@ from curobo.types import JointState
 from curobo.sphere_fit import SphereFitType, estimate_sphere_count
 
 from curobo_msgs.srv import AttachObject, RemoveObject
+from curobo_ros.robot.robot_description import resolve_package_uri
 
 ATTACH_LINK = "attached_object"
 
@@ -276,10 +277,11 @@ class AttachmentServices:
         if request.type == request.CYLINDER:
             return name, Cylinder(name=name, pose=pose, radius=d.x, height=d.y)
         if request.type == request.MESH:
-            if not os.path.isabs(request.mesh_file_path) or not os.path.exists(request.mesh_file_path):
-                raise ValueError(f"mesh_file_path must be an existing absolute path: "
-                                 f"'{request.mesh_file_path}'")
-            return name, Mesh(name=name, pose=pose, file_path=request.mesh_file_path,
+            file_path = resolve_package_uri(request.mesh_file_path)
+            if not os.path.isabs(file_path) or not os.path.exists(file_path):
+                raise ValueError(f"mesh_file_path must be an existing absolute path or "
+                                 f"package:// URI: '{request.mesh_file_path}'")
+            return name, Mesh(name=name, pose=pose, file_path=file_path,
                               scale=[d.x, d.y, d.z])
         raise ValueError(f"unknown payload type {request.type}")
 

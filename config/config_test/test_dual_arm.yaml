@@ -124,7 +124,7 @@ tests:
     data:
       type: 5
       name: "part"
-      mesh_file_path: "/home/ros2_ws/src/curobo_ros/config/config_test/cube_55mm.usda"
+      mesh_file_path: "package://curobo_ros/config/config_test/cube_55mm.usda"
       pose:
         position: {x: 1.5, y: 0.0, z: 0.43}
         orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

@@ -46,7 +46,7 @@ ros2 service call /unified_planner/add_object curobo_msgs/srv/AddObject \
     dimensions: {x: 1.0, y: 1.0, z: 1.0}, color: {g: 0.8, a: 1.0}}"
 ```
 
-`mesh_file_path` must be an **absolute path** (`.stl` or `.obj`), readable from inside the container. `dimensions` acts as a scale factor. In cuRobo v2 a mesh goes directly into the `Scene` — no voxelization step on your side.
+`mesh_file_path` must be an **absolute path** (`.stl` or `.obj`), readable from inside the container, or a `package://<package>/<file>` URI to a file installed with a package (for example `package://curobo_ros/config/config_test/Rubber_Duck.stl`). `dimensions` acts as a scale factor. In cuRobo v2 a mesh goes directly into the `Scene` — no voxelization step on your side.
 
 ## Listing and removing
 

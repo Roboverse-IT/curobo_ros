@@ -14,6 +14,8 @@ from curobo._src.geom.collision.collision_scene import SceneCollisionCfg, SceneC
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo.types import DeviceCfg
 
+from curobo_ros.robot.robot_description import resolve_package_uri
+
 
 class ObstacleManager:
     """
@@ -454,13 +456,14 @@ class ObstacleManager:
                     ))
 
                 case request.MESH:
-                    if not os.path.exists(request.mesh_file_path):
+                    file_path = resolve_package_uri(request.mesh_file_path)
+                    if not os.path.exists(file_path):
                         response.success = False
-                        response.message = f'Mesh file not found: {request.mesh_file_path}'
+                        response.message = f'Mesh file not found: {file_path}'
                         return response
                     self._append('mesh', Mesh(
                         name=request.name, pose=pose,
-                        file_path=request.mesh_file_path,
+                        file_path=file_path,
                         scale=dims, color=color,
                     ))
                     node.get_logger().info(
@@ -469,12 +472,13 @@ class ObstacleManager:
                     )
 
                 case request.USD:
-                    if not os.path.exists(request.mesh_file_path):
+                    file_path = resolve_package_uri(request.mesh_file_path)
+                    if not os.path.exists(file_path):
                         response.success = False
-                        response.message = f'USD file not found: {request.mesh_file_path}'
+                        response.message = f'USD file not found: {file_path}'
                         return response
                     mesh, padded = self._mesh_from_usd(
-                        request.name, request.mesh_file_path, pose, dims, color)
+                        request.name, file_path, pose, dims, color)
                     self._append('mesh', padded)
                     self.unpadded_meshes[request.name] = mesh
 

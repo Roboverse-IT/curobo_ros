@@ -21,7 +21,7 @@ from curobo_msgs.srv import SetMask, RemoveObject
 from scipy.spatial.transform import Rotation
 
 from curobo_ros.robot.robot_context import RobotContext
-from curobo_ros.robot.robot_description import resolve_curobo_config
+from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_package_uri
 
 
 class DepthMapRobotSegmentation(Node):
@@ -149,10 +149,17 @@ class DepthMapRobotSegmentation(Node):
         CYLINDER [r,h,_] (centered, axis z), MESH [sx,sy,sz].
         """
         d = request.dimensions
+        mesh_file_path = request.mesh_file_path
         if request.type == 4:
-            if not os.path.exists(request.mesh_file_path):
+            try:
+                mesh_file_path = resolve_package_uri(mesh_file_path)
+            except ValueError as ex:
                 response.success = False
-                response.message = f'Mesh file not found: {request.mesh_file_path}'
+                response.message = str(ex)
+                return response
+            if not os.path.exists(mesh_file_path):
+                response.success = False
+                response.message = f'Mesh file not found: {mesh_file_path}'
                 return response
         elif d.x <= 0 or d.y <= 0 or d.z <= 0:
             response.success = False
@@ -164,7 +171,7 @@ class DepthMapRobotSegmentation(Node):
         self._masks[request.name] = {
             'type': request.type,
             'frame_id': request.frame_id,
-            'mesh_file_path': request.mesh_file_path,
+            'mesh_file_path': mesh_file_path,
             'pos': torch.tensor([p.x, p.y, p.z],
                                 dtype=self._ops_dtype, device=self._device),
             'quat': [o.x, o.y, o.z, o.w],  # scipy order

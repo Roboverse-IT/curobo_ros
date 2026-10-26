@@ -43,7 +43,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 import yaml as _yaml
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import (
+    get_package_share_directory, PackageNotFoundError)
 from curobo.config_io import load_yaml
 
 _RESOLVED_DIR = '/tmp/curobo_ros_resolved'
@@ -60,6 +61,21 @@ def _resolve_uri(path: Optional[str], base_dir: str) -> Optional[str]:
     if os.path.isabs(path):
         return path
     return os.path.normpath(os.path.join(base_dir, path))
+
+
+def resolve_package_uri(path: str) -> str:
+    """Resolve ``package://<package>/<file>`` to the installed file; other paths are unchanged.
+
+    For file paths given in service requests (meshes, USD files), so they can
+    point into an installed package instead of one machine's checkout.
+    Raises ValueError when the package is not installed.
+    """
+    if not path.startswith('package://'):
+        return path
+    try:
+        return _resolve_uri(path, '')
+    except (PackageNotFoundError, ValueError) as ex:
+        raise ValueError(f"Cannot resolve '{path}': {ex}") from ex
 
 
 def resolve_curobo_config(curobo_path: str) -> str:

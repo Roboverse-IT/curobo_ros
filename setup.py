@@ -20,6 +20,8 @@ setup(
         (os.path.join('share', package_name, 'curobo_doosan/src/m1013/meshes', 'm1013_blue'),      glob(os.path.join('curobo_doosan/src/m1013/meshes/m1013_blue', '*.dae*'))), #TODO faire une packages ros2 pour la config doosan
         (os.path.join('share', package_name, 'rviz'),                                        glob('rviz/*.rviz')),
         (os.path.join('share', package_name, 'config'),                                        glob('config/*.*')),
+        (os.path.join('share', package_name, 'config/config_test'),
+            glob('config/config_test/*.*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

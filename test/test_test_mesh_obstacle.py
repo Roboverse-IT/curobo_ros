@@ -205,7 +205,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = AddObject.Request()
-        set_message_fields(request, {'type': 4, 'name': 'rubber_duck', 'mesh_file_path': '/home/ros2_ws/src/curobo_ros/config/config_test/Rubber_Duck.stl', 'pose': {'position': {'x': 0.0, 'y': 0.0, 'z': 0.0}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'dimensions': {'x': 0.01, 'y': 0.01, 'z': 0.01}, 'color': {'r': 1.0, 'g': 0.8, 'b': 0.0, 'a': 1.0}})
+        set_message_fields(request, {'type': 4, 'name': 'rubber_duck', 'mesh_file_path': 'package://curobo_ros/config/config_test/Rubber_Duck.stl', 'pose': {'position': {'x': 0.0, 'y': 0.0, 'z': 0.0}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'dimensions': {'x': 0.01, 'y': 0.01, 'z': 0.01}, 'color': {'r': 1.0, 'g': 0.8, 'b': 0.0, 'a': 1.0}})
 
         # Call service
         future = client.call_async(request)

@@ -67,7 +67,7 @@ tests:
     data:
       type: 4
       name: "rubber_duck"
-      mesh_file_path: "/home/ros2_ws/src/curobo_ros/config/config_test/Rubber_Duck.stl"
+      mesh_file_path: "package://curobo_ros/config/config_test/Rubber_Duck.stl"
       pose:
         position: {x: 0.0, y: 0.0, z: 0.0}
         orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}

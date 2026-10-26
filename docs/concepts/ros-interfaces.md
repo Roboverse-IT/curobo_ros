@@ -97,7 +97,7 @@ Request:
 |---|---|---|
 | `type` | `int8` | `CUBOID=0`, `SPHERE=1`, `CAPSULE=2`, `CYLINDER=3`, `MESH=4`, `USD=5` |
 | `name` | `string` | Must be unique |
-| `mesh_file_path` | `string` | Mesh or USD only; absolute path to `.stl`/`.obj`, or to a `.usd`/`.usda` |
+| `mesh_file_path` | `string` | Mesh or USD only; absolute path or `package://<package>/<file>` URI to `.stl`/`.obj`, or to a `.usd`/`.usda` |
 | `pose` | `geometry_msgs/Pose` | In the robot base frame |
 | `dimensions` | `geometry_msgs/Vector3` | Semantics depend on `type` (see below) |
 | `color` | `std_msgs/ColorRGBA` | Visualization only |
@@ -149,7 +149,7 @@ Types: `curobo_msgs/srv/AttachObject` and `std_srvs/srv/Trigger`. Attaches an ex
 | `num_spheres` | `int32` | `0` = estimated from the geometry; either way capped at the link's sphere budget |
 | `start_pose` | `sensor_msgs/JointState` | Configuration the object is attached at, in `joint_names` order. Empty = the robot's current one |
 
-With `object_name` empty, the payload is the geometry the request describes: `type` and `dimensions` as in `add_object`, `pose` in `header.frame_id` (empty = the robot base; otherwise a robot link fixed to a tool frame, e.g. the gripper), `mesh_file_path` absolute for a mesh. It is attached as `payload@<attach link>` and has no world copy. The spheres are fitted in the world and moved into the attach link's frame at the attach configuration. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel. The fitted spheres reach every solver: `ik` / `ik_batch` answers account for the payload.
+With `object_name` empty, the payload is the geometry the request describes: `type` and `dimensions` as in `add_object`, `pose` in `header.frame_id` (empty = the robot base; otherwise a robot link fixed to a tool frame, e.g. the gripper), `mesh_file_path` absolute or `package://` for a mesh. It is attached as `payload@<attach link>` and has no world copy. The spheres are fitted in the world and moved into the attach link's frame at the attach configuration. An obstacle read from USD is fitted from its geometry as read, not from the copy widened for the SDF kernel. The fitted spheres reach every solver: `ik` / `ik_batch` answers account for the payload.
 
 ### `/unified_planner/detach_link`
 
