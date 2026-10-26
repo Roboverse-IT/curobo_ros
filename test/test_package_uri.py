@@ -5,7 +5,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from curobo_msgs.srv import AddObject
 from curobo_ros.core.obstacle_manager import ObstacleManager
-from curobo_ros.robot.robot_description import resolve_package_uri
+from curobo_ros.robot.robot_description import resolve_package_uri, resolve_request_file
 import pytest
 import rclpy
 
@@ -41,6 +41,23 @@ def test_unresolvable_package_is_a_value_error(uri):
         resolve_package_uri(uri)
 
 
+def test_request_file_is_an_existing_absolute_path_or_package_uri():
+    assert resolve_request_file(DUCK) == resolve_package_uri(DUCK)
+    assert resolve_request_file(resolve_package_uri(DUCK)) == resolve_package_uri(DUCK)
+
+
+@pytest.mark.parametrize('path', [
+    'config/config_test/Rubber_Duck.stl',  # relative: depends on the working directory
+    '/no/such/duck.stl',
+    'package://curobo_ros/config/config_test/no_such_duck.stl',
+    'package://curobo_ros/config/config_test',  # a directory
+    '',
+])
+def test_request_file_rejects_other_paths(path):
+    with pytest.raises(ValueError, match='existing absolute path or package:// URI'):
+        resolve_request_file(path)
+
+
 def mesh_request(path):
     request = AddObject.Request(type=AddObject.Request.MESH, name='duck', mesh_file_path=path)
     request.pose.orientation.w = 1.0
@@ -63,4 +80,17 @@ def test_add_object_reports_an_unknown_package(node):
 
     assert not response.success
     assert 'no_such_package' in response.message
+    assert manager.scene.mesh == []
+
+
+def test_add_object_rejects_a_relative_path(node, monkeypatch):
+    """Even when the file exists relative to the working directory."""
+    monkeypatch.chdir(get_package_share_directory('curobo_ros'))
+    assert os.path.isfile('config/config_test/Rubber_Duck.stl')
+    manager = ObstacleManager(node, None)
+    response = manager.add_object(
+        node, mesh_request('config/config_test/Rubber_Duck.stl'), AddObject.Response())
+
+    assert not response.success
+    assert 'existing absolute path or package:// URI' in response.message
     assert manager.scene.mesh == []

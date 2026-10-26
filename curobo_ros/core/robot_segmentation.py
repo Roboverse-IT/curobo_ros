@@ -1,4 +1,3 @@
-import os
 import torch
 import numpy as np
 
@@ -21,7 +20,7 @@ from curobo_msgs.srv import SetMask, RemoveObject
 from scipy.spatial.transform import Rotation
 
 from curobo_ros.robot.robot_context import RobotContext
-from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_package_uri
+from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_request_file
 
 
 class DepthMapRobotSegmentation(Node):
@@ -152,14 +151,10 @@ class DepthMapRobotSegmentation(Node):
         mesh_file_path = request.mesh_file_path
         if request.type == 4:
             try:
-                mesh_file_path = resolve_package_uri(mesh_file_path)
+                mesh_file_path = resolve_request_file(mesh_file_path)
             except ValueError as ex:
                 response.success = False
                 response.message = str(ex)
-                return response
-            if not os.path.exists(mesh_file_path):
-                response.success = False
-                response.message = f'Mesh file not found: {mesh_file_path}'
                 return response
         elif d.x <= 0 or d.y <= 0 or d.z <= 0:
             response.success = False

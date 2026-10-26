@@ -138,7 +138,7 @@ Details in the [Parameters Guide](../concepts/parameters.md) and [ROS Interfaces
 | Symptom | Cause / fix |
 |---|---|
 | Object added but planner ignores it | Check `get_obstacles`; if listed, verify pose/dimensions units (metres, full extents for cuboids) |
-| `add_object` fails on a mesh | Path not absolute, or not readable inside the container |
+| `add_object` fails on a mesh | Path neither absolute nor `package://`, or not readable inside the container. The error message names the path |
 | Attach fails | Object name not in the scene, or robot config lacks `attached_object` |
 | Adding objects fails after many adds | Collision cache full — grow it (see above) |
 

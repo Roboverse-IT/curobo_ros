@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import torch
 import ros2_numpy as rnp
@@ -14,7 +13,7 @@ from curobo._src.geom.collision.collision_scene import SceneCollisionCfg, SceneC
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo.types import DeviceCfg
 
-from curobo_ros.robot.robot_description import resolve_package_uri
+from curobo_ros.robot.robot_description import resolve_request_file
 
 
 class ObstacleManager:
@@ -456,11 +455,7 @@ class ObstacleManager:
                     ))
 
                 case request.MESH:
-                    file_path = resolve_package_uri(request.mesh_file_path)
-                    if not os.path.exists(file_path):
-                        response.success = False
-                        response.message = f'Mesh file not found: {file_path}'
-                        return response
+                    file_path = resolve_request_file(request.mesh_file_path)
                     self._append('mesh', Mesh(
                         name=request.name, pose=pose,
                         file_path=file_path,
@@ -472,11 +467,7 @@ class ObstacleManager:
                     )
 
                 case request.USD:
-                    file_path = resolve_package_uri(request.mesh_file_path)
-                    if not os.path.exists(file_path):
-                        response.success = False
-                        response.message = f'USD file not found: {file_path}'
-                        return response
+                    file_path = resolve_request_file(request.mesh_file_path)
                     mesh, padded = self._mesh_from_usd(
                         request.name, file_path, pose, dims, color)
                     self._append('mesh', padded)

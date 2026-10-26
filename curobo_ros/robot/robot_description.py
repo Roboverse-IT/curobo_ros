@@ -78,6 +78,20 @@ def resolve_package_uri(path: str) -> str:
         raise ValueError(f"Cannot resolve '{path}': {ex}") from ex
 
 
+def resolve_request_file(path: str) -> str:
+    """Resolve a file path from a service request (mesh, USD) to an existing absolute path.
+
+    Accepts an absolute path or a ``package://`` URI. A relative path is
+    rejected: it would depend on the node's working directory.
+    Raises ValueError otherwise.
+    """
+    resolved = resolve_package_uri(path)
+    if not os.path.isabs(resolved) or not os.path.isfile(resolved):
+        raise ValueError(
+            f"File must be an existing absolute path or package:// URI: '{path}'")
+    return resolved
+
+
 def resolve_curobo_config(curobo_path: str) -> str:
     """Resolve a cuRobo robot-config YAML's ``urdf_path``/``asset_root_path``
     to absolute paths, writing a resolved copy if anything changed.

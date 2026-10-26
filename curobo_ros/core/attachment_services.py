@@ -26,7 +26,6 @@ services, MPC, retargeter), each of which has its own copy of the robot's
 spheres: see the node's apply_robot_sphere_states / apply_obstacle_states.
 """
 
-import os
 
 import torch
 from std_srvs.srv import Trigger
@@ -35,7 +34,7 @@ from curobo.types import JointState
 from curobo.sphere_fit import SphereFitType, estimate_sphere_count
 
 from curobo_msgs.srv import AttachObject, RemoveObject
-from curobo_ros.robot.robot_description import resolve_package_uri
+from curobo_ros.robot.robot_description import resolve_request_file
 
 ATTACH_LINK = "attached_object"
 
@@ -277,10 +276,7 @@ class AttachmentServices:
         if request.type == request.CYLINDER:
             return name, Cylinder(name=name, pose=pose, radius=d.x, height=d.y)
         if request.type == request.MESH:
-            file_path = resolve_package_uri(request.mesh_file_path)
-            if not os.path.isabs(file_path) or not os.path.exists(file_path):
-                raise ValueError(f"mesh_file_path must be an existing absolute path or "
-                                 f"package:// URI: '{request.mesh_file_path}'")
+            file_path = resolve_request_file(request.mesh_file_path)
             return name, Mesh(name=name, pose=pose, file_path=file_path,
                               scale=[d.x, d.y, d.z])
         raise ValueError(f"unknown payload type {request.type}")
