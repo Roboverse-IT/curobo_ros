@@ -4,6 +4,9 @@ cameras:
   - name: depth_map_test
     type: depth_camera
     topic: /depth_to_rgb/image_raw
+    # Required: the header.frame_id of the depth images. Images from another
+    # frame are dropped. It is the TF child frame (or the frame the extrinsics
+    # below describe).
     frame_id: rgb_camera_link
     camera_info: /depth_to_rgb/camera_info  # Topic the intrinsics are read from
     #   # Option A: full K matrix (9 elements: fx, 0, cx, 0, fy, cy, 0, 0, 1)
@@ -16,8 +19,9 @@ cameras:
     #   #   cy: 240.5
     intrinsics: []  # Empty = read them from the camera_info topic
     # Extrinsics: [x, y, z, qw, qx, qy, qz] (cuRobo order).
-    # Empty = resolve TF base frame -> frame_id per frame; frames are DROPPED
-    # while that transform is unavailable, there is no identity fallback.
+    # Empty = resolve TF base frame -> frame_id at each image's header stamp;
+    # frames are DROPPED while that transform is unavailable or the stamp is
+    # zero, there is no identity or latest-transform fallback.
     extrinsics: [0.161, -0.428, 1.585, -0.3409296, 0.6840516, -0.6215661, 0.1717437]
     # The REAL publication rate of `topic`. cuRobo decrements the weight of ALL
     # voxels once per integrate() call, so the rate driving forgetting is the SUM

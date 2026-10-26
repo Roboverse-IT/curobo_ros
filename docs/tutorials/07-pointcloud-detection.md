@@ -28,20 +28,22 @@ cameras:
   - name: my_depth_cam
     type: depth_camera                      # the only supported type
     topic: /depth_to_rgb/image_raw          # sensor_msgs/Image, 16UC1 (mm) or 32FC1 (m)
-    frame_id: rgb_camera_link               # TF frame of the camera
+    frame_id: rgb_camera_link               # required: header.frame_id of the depth images
     camera_info: /depth_to_rgb/camera_info  # used when intrinsics is empty
     intrinsics: []                          # [] = read once from camera_info (5 s wait)
     # or a 9-element row-major K: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
     extrinsics: [0.161, -0.428, 1.585, -0.3409296, 0.6840516, -0.6215661, 0.1717437]
     # [x, y, z, qw, qx, qy, qz] camera pose in the robot base frame;
-    # [] = look it up from TF (base frame -> frame_id) per frame
+    # [] = look it up from TF (base frame -> frame_id) at each image's stamp
     frame_rate_hz: 30.0                     # declared publication rate (drives decay)
 ```
 
 Two decisions per camera:
 
 - **Intrinsics** — leave `[]` to read them once from the `camera_info` topic at startup, or hardcode the 9-element K matrix.
-- **Extrinsics** — hardcode the 7-element pose (recommended once calibrated), or leave `[]` to resolve TF `base frame → frame_id` per frame. With TF, frames are **dropped** when the transform is unavailable — there is no identity-pose fallback.
+- **Extrinsics** — hardcode the 7-element pose (recommended once calibrated), or leave `[]` to resolve TF `base frame → frame_id` at each image's `header.stamp` (the acquisition time, so a moving camera is posed where it was when the image was taken). With TF, frames are **dropped** when the transform at that stamp is unavailable or the stamp is zero — there is no identity-pose or latest-transform fallback.
+
+`frame_id` is required and must equal the `header.frame_id` of the depth images: frames from any other frame are dropped with an error, because they would be projected with the wrong pose.
 
 Multiple cameras: add more list entries. Their rates sum for the decay computation, and all integrate into the same Mapper.
 

@@ -33,11 +33,20 @@ class DepthMapCameraStrategy(CameraStrategy):
             camera_name: Name of the camera
             topic: Topic name for depth image
             camera_info_topic: Topic name for camera info
-            frame_id: Frame ID for the camera
+            frame_id: Frame of the depth image (its header.frame_id). Required:
+                frames from any other frame are dropped, and it is the TF
+                child frame (or the frame the static extrinsics describe).
             intrinsics: Optional camera intrinsics from config (list or dict)
             extrinsics: Optional camera extrinsics from config (list)
         """
         super().__init__(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics)
+
+        # Without a frame neither the TF lookup nor the static extrinsics refer to
+        # anything, and the incoming header.frame_id cannot be checked.
+        if not frame_id:
+            raise ValueError(
+                f"Camera '{camera_name}': 'frame_id' is required (the frame_id of "
+                f'the depth images on {topic})')
 
         # Robot base frame for the camera-pose TF lookup. Read from the node's
         # 'base_link' parameter (the planner's configurable base frame) instead
@@ -102,6 +111,66 @@ class DepthMapCameraStrategy(CameraStrategy):
         Args:
             msg: Image message
         """
+        # Intrinsics and extrinsics belong to the configured frame: a depth
+        # image from any other frame would be projected with the wrong pose.
+        if msg.header.frame_id != self._frame_id:
+            self.node.get_logger().error(
+                f"Depth frame_id '{msg.header.frame_id}' on {self._topic} does not "
+                f"match the configured frame_id '{self._frame_id}'. Dropping this "
+                'depth frame (no integration).',
+                throttle_duration_sec=2.0)
+            return
+        if self.camera_pose_static is not None:
+            self._integrate(msg, self.camera_pose_static)
+            return
+
+        # The camera pose is the one at the image's acquisition time, not the
+        # latest one: a moving camera keeps moving between acquisition and this
+        # callback. A zero stamp would make tf2 return the latest transform, so
+        # it is rejected instead.
+        stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+        if stamp.nanoseconds == 0:
+            self.node.get_logger().error(
+                f'Depth image on {self._topic} has no header stamp. '
+                'Dropping this depth frame (no integration).',
+                throttle_duration_sec=2.0)
+            return
+
+        self._integrate_stamped(msg, stamp)
+
+    def _integrate_stamped(self, msg, stamp):
+        """Integrate `msg` with the TF at `stamp`; drop it if that TF is unavailable."""
+        try:
+            t = self.tf_buffer.lookup_transform(self.base_frame, self._frame_id, stamp)
+        except TransformException as ex:
+            # Do NOT fall back to an identity or the latest pose: that would
+            # integrate this frame's depth where the camera was not, placing
+            # phantom obstacles in the collision world (and leaving the real
+            # observed volume uncovered) — worse than skipping the frame.
+            self.node.get_logger().warn(
+                f'Could not transform {self.base_frame} to {self._frame_id} '
+                f'at {stamp.nanoseconds * 1e-9:.6f} s: '
+                f'{ex}. Dropping this depth frame (no integration).',
+                throttle_duration_sec=2.0)
+            return
+        translation = t.transform.translation
+        position = [translation.x, translation.y, translation.z]
+        rotation_msg = t.transform.rotation
+        quat_ros = [rotation_msg.x, rotation_msg.y, rotation_msg.z, rotation_msg.w]
+        quat_scipy = Rotation.from_quat(quat_ros).as_quat()  # [x, y, z, w]
+        # cuRobo expects [x, y, z, qw, qx, qy, qz]
+        self._integrate(
+            msg, position + [quat_scipy[3], quat_scipy[0], quat_scipy[1], quat_scipy[2]])
+
+    def _integrate(self, msg, pose):
+        """
+        Integrate one depth image into the Mapper.
+
+        Args:
+            msg: Image message
+            pose: Camera pose in the base frame, a cuRobo Pose or a plain
+                [x, y, z, qw, qx, qy, qz] list (converted on the GPU below).
+        """
         try:
             # ---- CPU-only work first (safe to run during a CUDA graph capture) ----
             # Convert ROS image to numpy (millimetres 16UC1 or metres 32FC1).
@@ -113,32 +182,6 @@ class DepthMapCameraStrategy(CameraStrategy):
             else:
                 self.node.get_logger().warn(f"Unsupported depth encoding: {msg.encoding}, trying 32FC1")
                 depth_img_float = self.bridge.imgmsg_to_cv2(msg, "32FC1")
-
-            # Resolve the camera pose as a plain CPU list; GPU conversion is deferred
-            # to the locked section below.
-            pose_list = None
-            if self.camera_pose_static is None:
-                try:
-                    t = self.tf_buffer.lookup_transform(
-                        self.base_frame, self._frame_id, rclpy.time.Time())
-                    translation = t.transform.translation
-                    position = [translation.x, translation.y, translation.z]
-                    rotation_msg = t.transform.rotation
-                    quat_ros = [rotation_msg.x, rotation_msg.y, rotation_msg.z, rotation_msg.w]
-                    quat_scipy = Rotation.from_quat(quat_ros).as_quat()  # [x, y, z, w]
-                    # cuRobo expects [x, y, z, qw, qx, qy, qz]
-                    pose_list = position + [quat_scipy[3], quat_scipy[0], quat_scipy[1], quat_scipy[2]]
-                except TransformException as ex:
-                    # Do NOT fall back to an identity pose: that would integrate
-                    # this frame's depth as if the camera sat at the robot base,
-                    # placing phantom obstacles in the collision world (and
-                    # leaving the real observed volume uncovered) — worse than
-                    # skipping the frame entirely. Drop it and retry next frame.
-                    self.node.get_logger().warn(
-                        f'Could not transform {self.base_frame} to {self._frame_id}: '
-                        f'{ex}. Dropping this depth frame (no integration).',
-                        throttle_duration_sec=2.0)
-                    return
 
             # ---- GPU section: EVERY CUDA op is under the lock ----
             # depth->cuda, pose->cuda, rgb alloc AND mapper.integrate are all GPU
@@ -164,10 +207,10 @@ class DepthMapCameraStrategy(CameraStrategy):
                 depth_tensor = torch.from_numpy(depth_img_float).to(
                     device=self.tensor_args.device, dtype=self.tensor_args.dtype)
 
-                if self.camera_pose_static is not None:
-                    self.camera_pose = self.camera_pose_static
+                if isinstance(pose, Pose):
+                    self.camera_pose = pose
                 else:
-                    self.camera_pose = Pose.from_list(pose_list, device_cfg=self.tensor_args)
+                    self.camera_pose = Pose.from_list(pose, device_cfg=self.tensor_args)
 
                 # v2 Mapper requires a leading camera dimension on every field and a
                 # paired rgb image (zero buffer — no colour for collision mapping).
