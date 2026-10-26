@@ -95,7 +95,10 @@ class DepthMapRobotSegmentation(Node):
 
         self.depth_image = None
         self.camera_info = None
-        self.depth_frame_id = None
+        # Header of the depth frame being segmented. Everything published for
+        # that frame carries its stamp, so consumers can match it to the TF and
+        # joint states of the moment the depth was captured.
+        self.depth_header = None
         self.bridge = CvBridge()
 
         # Extra user-defined masks (e.g. a grasped object) removed from the depth
@@ -219,7 +222,7 @@ class DepthMapRobotSegmentation(Node):
             # Convert to torch tensor
             self.depth_image = torch.from_numpy(depth_img).to(
                 dtype=self._ops_dtype, device=self._device)
-            self.depth_frame_id = msg.header.frame_id
+            self.depth_header = msg.header
 
         except CvBridgeError as e:
             self.get_logger().error(f"CvBridge Error: {e}")
@@ -455,9 +458,9 @@ class DepthMapRobotSegmentation(Node):
         if self.robot_pointcloud_pub.get_subscription_count() > 0:
             robot_points = points_base[~mask]  # Points that belong to the robot
             if robot_points.shape[0] > 0:
-                timestamp = self.get_clock().now().to_msg()
                 robot_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-                pc_msg = self._create_pointcloud2_msg(robot_points, robot_frame, timestamp)
+                pc_msg = self._create_pointcloud2_msg(
+                    robot_points, robot_frame, self.depth_header.stamp)
                 self.robot_pointcloud_pub.publish(pc_msg)
 
         return point_cloud[mask]
@@ -471,10 +474,10 @@ class DepthMapRobotSegmentation(Node):
         comes from the hand-eye calibration (base -> camera). Returns None if
         the transform is unavailable.
         """
-        if self.depth_frame_id is None:
+        if self.depth_header is None:
             return None
         robot_base_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-        T = self._tf_matrix(robot_base_frame, self.depth_frame_id)
+        T = self._tf_matrix(robot_base_frame, self.depth_header.frame_id)
         if T is None:
             return None
 
@@ -606,8 +609,7 @@ class DepthMapRobotSegmentation(Node):
 
         # Create Image message
         msg = self.bridge.cv2_to_imgmsg(depth_mm, encoding="16UC1")
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.depth_frame_id
+        msg.header = self.depth_header
 
         return msg
 
@@ -624,7 +626,7 @@ class DepthMapRobotSegmentation(Node):
         for i, sphere in enumerate(robot_spheres):
             marker = Marker()
             marker.header.frame_id = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.header.stamp = self.depth_header.stamp
             marker.type = Marker.SPHERE
             marker.action = Marker.ADD
             marker.id = i

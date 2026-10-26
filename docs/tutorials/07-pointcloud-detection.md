@@ -99,7 +99,7 @@ It computes the robot's collision spheres at the current joint state, masks ever
 | Interface | Name | Notes |
 |---|---|---|
 | Subscribes | `/depth_to_rgb/image_raw`, `/depth_to_rgb/camera_info` | Params `depth_image_topic` / `camera_info_topic` |
-| Publishes | `/masked_depth_image` | The depth image with the robot removed |
+| Publishes | `/masked_depth_image` | The depth image with the robot removed, with the source image header (stamp and frame) |
 | Publishes | `/collision_spheres`, `/robot_pointcloud_debug` | Debug visualization |
 | Services | `/set_mask`, `/remove_mask` | Extra user-defined masks, optionally riding TF frames |
 

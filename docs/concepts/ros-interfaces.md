@@ -323,6 +323,8 @@ The active control strategy adds its own topics, configured in the robot descrip
 | Service | `/set_mask` | `curobo_msgs/srv/SetMask` |
 | Service | `/remove_mask` | `curobo_msgs/srv/RemoveObject` |
 
+Everything published for a depth frame carries that frame's stamp. `/masked_depth_image` keeps the full source header (stamp and `frame_id`), so the planner poses it with the TF at capture time, as it does for a raw depth topic. The markers and debug cloud are in `robot_base_frame`.
+
 ## Checking node readiness
 
 The planner builds its solvers synchronously at startup (roughly 25–35 s). Two reliable ways to wait for it:
