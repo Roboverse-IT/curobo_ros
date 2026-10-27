@@ -1,11 +1,11 @@
 from curobo_ros.cameras.camera_strategy import CameraStrategy
 from curobo.types import CameraObservation, Pose
+from curobo_ros.core.stamp_wait import StampWait
 
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, CameraInfo
 from rclpy.wait_for_message import wait_for_message
 import rclpy
-from rclpy.clock import Clock, ClockType
 from scipy.spatial.transform import Rotation
 from tf2_ros import TransformException
 
@@ -113,23 +113,12 @@ class DepthMapCameraStrategy(CameraStrategy):
         self.sub_depth = self.node.create_subscription(
             Image, topic, self.callback_depth_map, 1)
 
-        # A depth frame can arrive before the TF at its stamp: it waits here (at
-        # most one, the newest) instead of being dropped. The guard condition and
-        # the deadline timer share the subscription's callback group, so the
-        # waiting frame is only ever touched by one callback at a time; the TF
-        # side (another thread) only triggers the guard condition. At most one
-        # TF watch is registered with the buffer: tf2 only unregisters a
-        # cancelled one on the next TF message, so one per frame would pile up
-        # while TF is down.
-        self._waiting = None  # (msg, stamp)
-        self._tf_watch = None  # future of the buffer's wait_for_transform_async
-        if self._tf_wait_max_s > 0.0:
-            self._tf_arrived = self.node.create_guard_condition(
-                self._integrate_waiting, callback_group=self.sub_depth.callback_group)
-            self._tf_deadline = self.node.create_timer(
-                self._tf_wait_max_s, self._expire_waiting,
-                callback_group=self.sub_depth.callback_group,
-                clock=Clock(clock_type=ClockType.STEADY_TIME), autostart=False)
+        # A depth frame can arrive before the TF at its stamp: it waits (at most
+        # one, the newest, for at most tf_wait_max_s) instead of being dropped.
+        self._stamp_wait = StampWait(
+            self.node, self.tf_buffer, self._tf_wait_max_s,
+            process=self._integrate_stamped, missing_tf=self._missing_tf,
+            callback_group=self.sub_depth.callback_group)
 
         # Image processing
         self.bridge = CvBridge()
@@ -169,45 +158,13 @@ class DepthMapCameraStrategy(CameraStrategy):
                 throttle_duration_sec=2.0)
             return
 
-        # An older frame still waiting goes first if its TF has arrived meanwhile,
-        # so frames are integrated in acquisition order; otherwise it is dropped.
-        self._integrate_waiting(superseded=True)
+        self._stamp_wait.submit(msg, stamp)
 
-        if self._tf_wait_max_s == 0.0 or self.tf_buffer.can_transform(
-                self.base_frame, self._frame_id, stamp):
-            self._integrate_stamped(msg, stamp)
-            return
-        self._waiting = (msg, stamp)
-        self._tf_deadline.reset()
-        self._watch_tf(stamp)
-
-    def _watch_tf(self, stamp):
-        """Trigger _integrate_waiting once TF covers `stamp`, or an older stamp still watched."""
-        if self._tf_watch is None or self._tf_watch.done():
-            self._tf_watch = self.tf_buffer.wait_for_transform_async(
-                self.base_frame, self._frame_id, stamp)
-            self._tf_watch.add_done_callback(lambda _: self._tf_arrived.trigger())
-
-    def _integrate_waiting(self, superseded=False):
-        """Integrate the waiting frame once TF covers its stamp (or drop it if superseded)."""
-        if self._waiting is None:
-            return
-        msg, stamp = self._waiting
-        if not superseded and not self.tf_buffer.can_transform(
-                self.base_frame, self._frame_id, stamp):
-            self._watch_tf(stamp)  # the watch that fired was for an older frame
-            return
-        self._waiting = None
-        self._tf_deadline.cancel()
-        self._integrate_stamped(msg, stamp)
-
-    def _expire_waiting(self):
-        """Deadline timer: TF did not cover the waiting frame's stamp within tf_wait_max_s."""
-        self._tf_deadline.cancel()
-        if self._waiting is not None:
-            msg, stamp = self._waiting
-            self._waiting = None
-            self._integrate_stamped(msg, stamp)
+    def _missing_tf(self, msg, stamp):
+        """Return (base, camera) if the camera TF at `stamp` has not arrived yet, else None."""
+        if self.tf_buffer.can_transform(self.base_frame, self._frame_id, stamp):
+            return None
+        return (self.base_frame, self._frame_id)
 
     def _integrate_stamped(self, msg, stamp):
         """Integrate `msg` with the TF at `stamp`; drop it if that TF is unavailable."""
