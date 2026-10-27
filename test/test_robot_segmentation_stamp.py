@@ -275,6 +275,88 @@ def test_tf_and_joint_states_are_stored_while_the_node_is_busy(node):
     assert node._joint_history.covers(at_stamp)
 
 
+FRANKA_DESCRIPTOR = """name: franka_test
+curobo_config: franka.yml
+strategy: emulator
+strategy_params:
+  joint_states_topic: /franka_test/joint_states
+"""
+FINGERS = ['panda_finger_joint1', 'panda_finger_joint2']  # locked at 0.04 in franka.yml
+
+
+@pytest.fixture
+def franka(tmp_path):
+    """Run the node on cuRobo's Franka, whose model locks the two finger joints."""
+    descriptor = tmp_path / 'franka_test.yaml'
+    descriptor.write_text(FRANKA_DESCRIPTOR)
+    rclpy.init(args=['--ros-args', '-p', f'robot:={descriptor}'])
+    node = DepthMapRobotSegmentation()
+    yield node
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def franka_spheres(fingers):
+    """Return the Franka's spheres at zero arm joints, its fingers locked at `fingers`."""
+    from curobo.config_io import load_yaml
+    from curobo.kinematics import Kinematics, KinematicsCfg
+    from curobo_ros.robot.robot_description import bundled_curobo_config
+    cfg = load_yaml(bundled_curobo_config('franka.yml'))
+    cfg['robot_cfg']['kinematics']['lock_joints'] = dict(zip(FINGERS, fingers))
+    kin = Kinematics(KinematicsCfg.from_robot_yaml_file(cfg))
+    return kin.compute_kinematics(CuroboJointState(
+        position=torch.zeros((1, len(kin.joint_names)), device='cuda'),
+        joint_names=kin.joint_names)).robot_spheres.reshape(-1, 4).cpu().numpy()
+
+
+def published_centres(markers):
+    return np.array([[m.pose.position.x, m.pose.position.y, m.pose.position.z]
+                     for m in markers.markers])
+
+
+def test_locked_joints_are_masked_at_their_values_at_the_depth_stamp(franka, monkeypatch):
+    camera_info(franka)
+    camera_tf(franka, 0, 1.0, static=True)
+    names = list(franka._kin_model.joint_names) + FINGERS
+    for t_ns, fingers in ((STAMP_NS - 2 * MS, 0.01), (STAMP_NS + 2 * MS, 0.03)):
+        franka.listener_callback_joint_states(JointState(
+            header=Header(stamp=stamp(t_ns)), name=names, position=[0.0] * 7 + [fingers] * 2))
+    markers = capture(franka.sphere_marker_pub, monkeypatch)
+
+    franka.listener_callback_depth(depth())
+
+    assert len(markers) == 1
+    # The fingers at 0.02 (interpolated), not at the configured 0.04.
+    configured, measured = franka_spheres([0.04] * 2)[:, :3], franka_spheres([0.02] * 2)[:, :3]
+    assert np.abs(configured - measured).max() > 0.01
+    np.testing.assert_allclose(published_centres(markers[0]), measured, atol=1e-4)
+
+
+def test_locked_joints_keep_their_configured_values_until_measured(franka, monkeypatch):
+    ready(franka)  # arm joints only
+    markers = capture(franka.sphere_marker_pub, monkeypatch)
+
+    franka.listener_callback_depth(depth())
+
+    assert len(markers) == 1
+    np.testing.assert_allclose(published_centres(markers[0]), franka_spheres([0.04] * 2)[:, :3],
+                               atol=1e-4)
+
+
+def test_a_frame_without_the_measured_locked_joints_at_its_stamp_is_dropped(franka, monkeypatch):
+    ready(franka)  # the arm joints around the stamp
+    franka.listener_callback_joint_states(JointState(  # the fingers only well before it
+        header=Header(stamp=stamp(STAMP_NS - 100 * MS)), name=FINGERS, position=[0.02] * 2))
+    images = capture(franka.publisher_, monkeypatch)
+    logged = warnings(franka, monkeypatch)
+
+    franka.listener_callback_depth(depth())
+    spin_for(franka, 0.15)
+
+    assert images == []
+    assert any(f'No {FINGERS} positions at the depth stamp' in w for w in logged)
+
+
 def test_destroy_node_stops_the_listener_threads():
     rclpy.init()
     try:

@@ -23,6 +23,7 @@ from scipy.spatial.transform import Rotation
 from curobo_ros.core.listener_thread import ListenerThread
 from curobo_ros.core.stamp_wait import StampWait
 from curobo_ros.robot.joint_state_history import DEFAULT_JOINT_STATE_MAX_GAP_S, JointStateHistory
+from curobo_ros.robot.locked_joints import LockedJoints
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_request_file
 
@@ -116,6 +117,15 @@ class DepthMapRobotSegmentation(Node):
                 f"Robot '{self.robot_context.description.name}': the descriptor has no "
                 'strategy_params.joint_states_topic, which segmentation needs')
         self._joint_history = JointStateHistory(kin_model.joint_names, joint_state_max_gap_s)
+        # The joints the model locks (e.g. a gripper's fingers) keep their
+        # configured values until the topic carries them; from then on each
+        # frame is masked with their values at its stamp too.
+        self._locked_joints = LockedJoints(kin_model, robot_config_file)
+        self._locked_history = (
+            JointStateHistory(self._locked_joints.names, joint_state_max_gap_s)
+            if self._locked_joints.names else None)
+        self._locked_measured = False
+        self._locked_configured_logged = False
 
         # TF and joint states are handled on threads of their own (see
         # ListenerThread): on this node's executor they queued behind
@@ -164,7 +174,7 @@ class DepthMapRobotSegmentation(Node):
         self._stamp_wait = StampWait(
             self, self.tf_buffer, stamp_wait_max_s,
             process=self._segment_at_stamp, missing_tf=self._missing_tf,
-            ready=lambda msg, stamp: self._joint_history.covers(stamp),
+            ready=lambda msg, stamp: self._joints_cover(stamp),
             callback_group=self.subscription_depth.callback_group)
 
         # On their own thread (see the TF listener above); the queue holds 0.2 s
@@ -263,6 +273,9 @@ class DepthMapRobotSegmentation(Node):
 
     def listener_callback_joint_states(self, msg):
         """Store a joint state; re-check a depth frame waiting for it (joint-state thread)."""
+        # A state without the locked joints is not for them: no warning.
+        if self._locked_history is not None and self._locked_history.add(msg) is None:
+            self._locked_measured = True
         reason = self._joint_history.add(msg)
         if reason is not None:
             self.get_logger().warn(
@@ -270,6 +283,11 @@ class DepthMapRobotSegmentation(Node):
                 throttle_duration_sec=5.0)
             return
         self._stamp_wait.notify()
+
+    def _joints_cover(self, stamp):
+        """Return True once the joint states (locked joints once measured) reach `stamp`."""
+        return self._joint_history.covers(stamp) and (
+            not self._locked_measured or self._locked_history.covers(stamp))
 
     def listener_callback_depth(self, msg):
         """
@@ -326,6 +344,19 @@ class DepthMapRobotSegmentation(Node):
         if q is None:
             self._drop(f'No joint positions at the depth stamp: {reason}', stamp)
             return
+        if self._locked_measured:
+            locked, reason = self._locked_history.at(stamp)
+            if locked is None:
+                self._drop(f'No {self._locked_joints.names} positions at the depth stamp: '
+                           f'{reason}', stamp)
+                return
+            self._locked_joints.update(locked)
+        elif self._locked_joints.names and not self._locked_configured_logged:
+            self._locked_configured_logged = True
+            self.get_logger().info(
+                f'{self._locked_joints.names} not on '
+                f'{self.subscription_joint_states.topic_name} yet: masked at their configured '
+                f'values {self._locked_joints.values}')
         base = self.get_parameter('robot_base_frame').get_parameter_value().string_value
         transforms = {}
         for frame in self._frames_needed(msg):
