@@ -94,16 +94,19 @@ If the camera sees the robot arm, the arm becomes an "obstacle" for itself. The 
 ros2 run curobo_ros robot_segmentation
 ```
 
-It computes the robot's collision spheres at the current joint state, masks every depth pixel within `distance_threshold` (default 0.05 m) of a sphere, and republishes the cleaned image:
+It computes the robot's collision spheres at the joint state of the depth image's stamp, masks every depth pixel within `distance_threshold` (default 0.05 m) of a sphere, and republishes the cleaned image:
 
 | Interface | Name | Notes |
 |---|---|---|
 | Subscribes | `/depth_to_rgb/image_raw`, `/depth_to_rgb/camera_info` | Params `depth_image_topic` / `camera_info_topic` |
+| Subscribes | the robot's joint states | The descriptor's `strategy_params.joint_states_topic` |
 | Publishes | `/masked_depth_image` | The depth image with the robot removed, with the source image header (stamp and frame) |
 | Publishes | `/collision_spheres`, `/robot_pointcloud_debug` | Debug visualization |
 | Services | `/set_mask`, `/remove_mask` | Extra user-defined masks, optionally riding TF frames |
 
 To use it, point the camera entry's `topic` at `/masked_depth_image` instead of the raw depth topic. Key parameters: `robot_base_frame` (default `base_0`), `mask_margin`.
+
+A frame is segmented only with the TF and joint states at its stamp; it waits for them at most `stamp_wait_max_s` (default 0.05 s), and is dropped with a warning otherwise (see [ROS interfaces](../concepts/ros-interfaces.md#robot_segmentation-node)).
 
 ## Tuning
 

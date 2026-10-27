@@ -317,6 +317,8 @@ The active control strategy adds its own topics, configured in the robot descrip
 |---|---|---|
 | Subscribes | `/depth_to_rgb/image_raw` (param `depth_image_topic`) | `sensor_msgs/Image` |
 | Subscribes | `/depth_to_rgb/camera_info` (param `camera_info_topic`) | `sensor_msgs/CameraInfo` |
+| Subscribes | the descriptor's `strategy_params.joint_states_topic` | `sensor_msgs/JointState` |
+| Subscribes | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` |
 | Publishes | `/masked_depth_image` | `sensor_msgs/Image` (`16UC1`) |
 | Publishes | `/collision_spheres` | `visualization_msgs/MarkerArray` |
 | Publishes | `/robot_pointcloud_debug` | `sensor_msgs/PointCloud2` |
@@ -324,6 +326,8 @@ The active control strategy adds its own topics, configured in the robot descrip
 | Service | `/remove_mask` | `curobo_msgs/srv/RemoveObject` |
 
 Everything published for a depth frame carries that frame's stamp. `/masked_depth_image` keeps the full source header (stamp and `frame_id`), so the planner poses it with the TF at capture time, as it does for a raw depth topic. The markers and debug cloud are in `robot_base_frame`.
+
+Each depth frame is segmented with the state at its own stamp: the camera and mask-frame TF looked up at the stamp, and the joint positions interpolated at the stamp between the two joint states around it (matched by joint name, so their order and extra joints such as a gripper's do not matter). A frame waits at most `stamp_wait_max_s` for that data; a frame without it (or in a joint-state gap larger than `joint_state_max_gap_s`) is dropped with a warning and nothing is published for it. TF and joint states are received on threads of their own, so they keep arriving while a frame is segmented. Only the newest depth frame is kept: frames that arrive during segmentation are replaced by the next one.
 
 ## Checking node readiness
 

@@ -7,7 +7,7 @@ from geometry_msgs.msg import TransformStamped
 import numpy as np
 import pytest
 import rclpy
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import Header
 import torch
 
@@ -39,7 +39,7 @@ def test_outputs_carry_the_depth_header(node, monkeypatch):
     camera_tf = TransformStamped()  # camera 1 m above the base, looking down
     camera_tf.header.frame_id, camera_tf.child_frame_id = base, CAMERA
     camera_tf.transform.translation.z = 1.0
-    camera_tf.transform.rotation.x = 1.0
+    camera_tf.transform.rotation.x, camera_tf.transform.rotation.w = 1.0, 0.0  # 180 deg about x
     node.tf_buffer.set_transform_static(camera_tf, 'test')
 
     # A mask over the whole view, so the debug cloud has points to publish.
@@ -52,6 +52,12 @@ def test_outputs_carry_the_depth_header(node, monkeypatch):
     markers = capture(node.sphere_marker_pub, monkeypatch)
     clouds = capture(node.robot_pointcloud_pub, monkeypatch, subscribed=True)
 
+    # The joints around the depth stamp, as the robot driver publishes them.
+    for t in (STAMP.nanosec - 2_000_000, STAMP.nanosec + 2_000_000):
+        node.listener_callback_joint_states(JointState(
+            header=Header(stamp=Time(sec=STAMP.sec, nanosec=t)),
+            name=list(node._kin_model.joint_names),
+            position=[0.0] * len(node._kin_model.joint_names)))
     node.listener_callback_camera_info(CameraInfo(
         width=64, height=48, k=[60.0, 0.0, 32.0, 0.0, 60.0, 24.0, 0.0, 0.0, 1.0]))
     depth = Image(header=Header(stamp=STAMP, frame_id=CAMERA), height=48, width=64,

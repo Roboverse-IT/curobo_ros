@@ -5,6 +5,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import JointState as JointStateMsg
 from std_msgs.msg import Header
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge, CvBridgeError
@@ -19,6 +20,9 @@ from curobo_msgs.srv import SetMask, RemoveObject
 
 from scipy.spatial.transform import Rotation
 
+from curobo_ros.core.listener_thread import ListenerThread
+from curobo_ros.core.stamp_wait import StampWait
+from curobo_ros.robot.joint_state_history import DEFAULT_JOINT_STATE_MAX_GAP_S, JointStateHistory
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_request_file
 
@@ -46,9 +50,26 @@ class DepthMapRobotSegmentation(Node):
         # be kept (i.e. considered NOT part of the robot). Was a constructor-only
         # kwarg, unreachable from a launch file — now a runtime-settable param.
         self.declare_parameter('distance_threshold', distance_threshold)
+        # A depth frame is segmented with the TF and joint states at its stamp.
+        # When they have not all arrived yet it waits, at most this long (s,
+        # steady clock); then it is dropped. 0 drops it at once. Covers TF
+        # publishers down to 20 Hz, as the planner's camera tf_wait_max_s.
+        self.declare_parameter('stamp_wait_max_s', 0.05)
+        # Largest gap (s) between the two joint states around a depth stamp
+        # that is still interpolated; a frame in a larger gap is dropped.
+        self.declare_parameter('joint_state_max_gap_s', DEFAULT_JOINT_STATE_MAX_GAP_S)
         self.mask_margin = self.get_parameter('mask_margin').get_parameter_value().double_value
         self.distance_threshold = self.get_parameter(
             'distance_threshold').get_parameter_value().double_value
+
+        stamp_wait_max_s = self.get_parameter('stamp_wait_max_s').get_parameter_value().double_value
+        joint_state_max_gap_s = self.get_parameter(
+            'joint_state_max_gap_s').get_parameter_value().double_value
+        if stamp_wait_max_s < 0.0:
+            raise ValueError(f"'stamp_wait_max_s' must be >= 0, got {stamp_wait_max_s}")
+        if joint_state_max_gap_s <= 0.0:
+            raise ValueError(
+                f"'joint_state_max_gap_s' must be > 0, got {joint_state_max_gap_s}")
 
         depth_image_topic = self.get_parameter('depth_image_topic').get_parameter_value().string_value
         camera_info_topic = self.get_parameter('camera_info_topic').get_parameter_value().string_value
@@ -85,8 +106,23 @@ class DepthMapRobotSegmentation(Node):
         # get_joint_name() DOF-consistent with this node's own kinematics.
         self.robot_context.bind_kinematics(kin_model)
 
+        # The joint states come straight from the robot's topic, by name and
+        # with their stamps, so each depth frame is segmented with the joints at
+        # its own stamp (the control strategy only keeps the latest state).
+        joint_states_topic = self.robot_context.description.strategy_params.get(
+            'joint_states_topic')
+        if not joint_states_topic:
+            raise ValueError(
+                f"Robot '{self.robot_context.description.name}': the descriptor has no "
+                'strategy_params.joint_states_topic, which segmentation needs')
+        self._joint_history = JointStateHistory(kin_model.joint_names, joint_state_max_gap_s)
+
+        # TF and joint states are handled on threads of their own (see
+        # ListenerThread): on this node's executor they queued behind
+        # segmentation, and a depth frame was dropped before its TF arrived.
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self._tf_thread = ListenerThread(f'{self.get_name()}_tf_listener')
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self._tf_thread.node)
 
         # DOF-agnostic (was a hardcoded 6-zero vector + empty joint_names).
         self.q_js = JointState(
@@ -99,6 +135,7 @@ class DepthMapRobotSegmentation(Node):
         # that frame carries its stamp, so consumers can match it to the TF and
         # joint states of the moment the depth was captured.
         self.depth_header = None
+        self._frame_transforms = {}
         self.bridge = CvBridge()
 
         # Extra user-defined masks (e.g. a grasped object) removed from the depth
@@ -121,6 +158,23 @@ class DepthMapRobotSegmentation(Node):
             depth_image_topic,
             self.listener_callback_depth,
             1)
+
+        # A depth frame waits (at most one, the newest) for the TF and joint
+        # states at its stamp; see stamp_wait_max_s.
+        self._stamp_wait = StampWait(
+            self, self.tf_buffer, stamp_wait_max_s,
+            process=self._segment_at_stamp, missing_tf=self._missing_tf,
+            ready=lambda msg, stamp: self._joint_history.covers(stamp),
+            callback_group=self.subscription_depth.callback_group)
+
+        # On their own thread (see the TF listener above); the queue holds 0.2 s
+        # of them at 500 Hz.
+        self._joint_state_thread = ListenerThread(f'{self.get_name()}_joint_states')
+        self.subscription_joint_states = self._joint_state_thread.node.create_subscription(
+            JointStateMsg,
+            joint_states_topic,
+            self.listener_callback_joint_states,
+            100)
 
         # Subscription to camera info
         self.subscription_camera_info = self.create_subscription(
@@ -201,11 +255,86 @@ class DepthMapRobotSegmentation(Node):
         """
         self.camera_info = msg
 
+    def destroy_node(self):
+        """Stop the TF and joint-state threads, then destroy the node."""
+        self._joint_state_thread.destroy()
+        self._tf_thread.destroy()
+        super().destroy_node()
+
+    def listener_callback_joint_states(self, msg):
+        """Store a joint state; re-check a depth frame waiting for it (joint-state thread)."""
+        reason = self._joint_history.add(msg)
+        if reason is not None:
+            self.get_logger().warn(
+                f'Joint state on {self.subscription_joint_states.topic_name} ignored: {reason}',
+                throttle_duration_sec=5.0)
+            return
+        self._stamp_wait.notify()
+
     def listener_callback_depth(self, msg):
         """
         Callback for receiving depth image data.
-        Converts the Image message into a tensor.
+        The frame is segmented once the TF and joint states at its stamp are
+        there (see stamp_wait_max_s), or dropped.
         """
+        # Segmentation is driven by frame ARRIVAL (i.e. camera rate, ~5Hz)
+        # rather than a 100Hz timer that republished the same frame -- nvblox
+        # then re-integrated the same depth data ~6x (wasted GPU work, competing
+        # with the MPPI solve). See debug 2026-07-15.
+        if self.camera_info is None:
+            self.get_logger().warn(
+                'No camera info received yet. Dropping this depth frame (nothing published).',
+                throttle_duration_sec=5.0)
+            return
+        # A zero stamp would make tf2 return the latest transform.
+        stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+        if stamp.nanoseconds == 0:
+            self._drop('the depth image has no header stamp', stamp)
+            return
+        self._stamp_wait.submit(msg, stamp)
+
+    def _missing_tf(self, msg, stamp):
+        """Return (base, frame) of a transform `msg` lacks at `stamp`, or None."""
+        base = self.get_parameter('robot_base_frame').get_parameter_value().string_value
+        for frame in self._frames_needed(msg):
+            if not self.tf_buffer.can_transform(base, frame, stamp):
+                return (base, frame)
+        return None
+
+    def _frames_needed(self, msg):
+        """Return the depth frame and every mask frame: all are posed in the base frame."""
+        frames = [msg.header.frame_id]
+        for m in self._masks.values():
+            if m['frame_id'] and m['frame_id'] not in frames:
+                frames.append(m['frame_id'])
+        return frames
+
+    def _drop(self, reason, stamp):
+        self.get_logger().warn(
+            f'{reason}. Dropping this depth frame (stamp {stamp.nanoseconds * 1e-9:.6f} s, '
+            'nothing published).',
+            throttle_duration_sec=2.0)
+
+    def _segment_at_stamp(self, msg, stamp):
+        """
+        Segment `msg` with the TF and joint states at `stamp`; drop it if either is missing.
+
+        Masking with any other pose would cut the robot where it was not at
+        capture time, and leave it in the depth where it was.
+        """
+        q, reason = self._joint_history.at(stamp)
+        if q is None:
+            self._drop(f'No joint positions at the depth stamp: {reason}', stamp)
+            return
+        base = self.get_parameter('robot_base_frame').get_parameter_value().string_value
+        transforms = {}
+        for frame in self._frames_needed(msg):
+            try:
+                transforms[frame] = self._tf_matrix(base, frame, stamp)
+            except tf2_ros.TransformException as ex:
+                self._drop(f'No TF {frame} -> {base} at the depth stamp: {ex}', stamp)
+                return
+
         try:
             # Convert ROS Image message to numpy array
             # Assuming depth is in millimeters (16UC1) or meters (32FC1)
@@ -223,31 +352,16 @@ class DepthMapRobotSegmentation(Node):
             self.depth_image = torch.from_numpy(depth_img).to(
                 dtype=self._ops_dtype, device=self._device)
             self.depth_header = msg.header
+            # base <- frame at the depth stamp, for the depth frame and every
+            # mask frame of this depth frame.
+            self._frame_transforms = transforms
 
         except CvBridgeError as e:
             self.get_logger().error(f"CvBridge Error: {e}")
             return
 
-        # Segmentation is driven by frame ARRIVAL (i.e. camera rate, ~5Hz)
-        # rather than a 100Hz timer that republished the same frame -- nvblox
-        # then re-integrated the same depth data ~6x (wasted GPU work, competing
-        # with the MPPI solve). See debug 2026-07-15.
-        if self.camera_info is not None:
-            joint_pose = self.robot_context.get_joint_pose()
-            expected_dof = len(self._kin_model.joint_names)
-            if len(joint_pose) != expected_dof:
-                # A mismatched vector would otherwise build a silently
-                # mis-shaped tensor here, and the failure would only surface
-                # deep inside compute_kinematics — hard to trace back to this.
-                self.get_logger().warn(
-                    f"Joint pose has {len(joint_pose)} values, expected "
-                    f"{expected_dof} (model DOF) - skipping this frame",
-                    throttle_duration_sec=5.0)
-                return
-            self.q_js.position = torch.tensor(
-                joint_pose, dtype=self._ops_dtype, device=self._device)
-            self.q_js.joint_names = self.robot_context.get_joint_name()
-            self.segment_and_publish()
+        self.q_js.position = torch.tensor(q, dtype=self._ops_dtype, device=self._device)
+        self.segment_and_publish()
 
     def segment_and_publish(self):
         """
@@ -431,9 +545,6 @@ class DepthMapRobotSegmentation(Node):
         # the distance test; keep the original camera-frame cloud so the depth
         # is reconstructed in the camera frame downstream.
         points_base = self._transform_points_to_base(point_cloud)
-        if points_base is None:
-            # No TF available -> skip masking instead of masking the wrong points.
-            return point_cloud
 
         points = points_base.unsqueeze(1)  # (N, 1, 3)
         spheres_centers = robot_spheres[:, :3].unsqueeze(0)  # (1, S, 3)
@@ -471,15 +582,9 @@ class DepthMapRobotSegmentation(Node):
         Robot collision spheres are expressed in the kinematic base frame while
         the depth point cloud is in the camera optical frame; without this
         transform the masking compares mismatched coordinate systems. The TF
-        comes from the hand-eye calibration (base -> camera). Returns None if
-        the transform is unavailable.
+        comes from the hand-eye calibration (base -> camera), at the depth stamp.
         """
-        if self.depth_header is None:
-            return None
-        robot_base_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-        T = self._tf_matrix(robot_base_frame, self.depth_header.frame_id)
-        if T is None:
-            return None
+        T = self._frame_transforms[self.depth_header.frame_id]
 
         homog = torch.cat(
             [points, torch.ones((points.shape[0], 1),
@@ -487,20 +592,13 @@ class DepthMapRobotSegmentation(Node):
             dim=1)  # (N, 4)
         return (homog @ T.T)[:, :3]
 
-    def _tf_matrix(self, target_frame: str, source_frame: str):
-        """4x4 homogeneous transform ``target <- source`` from TF, or None.
+    def _tf_matrix(self, target_frame: str, source_frame: str, stamp):
+        """4x4 homogeneous transform ``target <- source`` from TF at ``stamp``.
 
         Shared by the robot base transform and the per-mask frame tracking.
-        Returns None (with a throttled warning) if the transform is unavailable.
+        Raises tf2_ros.TransformException if the transform is unavailable at ``stamp``.
         """
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                target_frame, source_frame, rclpy.time.Time())
-        except Exception as e:  # TransformException and friends
-            self.get_logger().warn(
-                f'TF {source_frame} -> {target_frame} unavailable: {e}',
-                throttle_duration_sec=2.0)
-            return None
+        tf = self.tf_buffer.lookup_transform(target_frame, source_frame, stamp)
 
         tr = tf.transform.translation
         rot = tf.transform.rotation
@@ -524,13 +622,13 @@ class DepthMapRobotSegmentation(Node):
         """Boolean (N,) mask, True where a base-frame point lies inside ANY
         user-defined mask shape. Returns None when no masks are defined.
 
-        Each mask pose is expressed in its ``frame_id`` (re-resolved every cycle
-        so it follows the arm); an empty frame_id means the robot base frame.
+        Each mask pose is expressed in its ``frame_id`` (re-resolved at every
+        depth stamp so it follows the arm); an empty frame_id means the robot
+        base frame.
         """
         if not self._masks:
             return None
 
-        base_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
         N = points_base.shape[0]
         homog = torch.cat(
             [points_base, torch.ones((N, 1),
@@ -541,10 +639,7 @@ class DepthMapRobotSegmentation(Node):
         for m in self._masks.values():
             T_frame_mask = self._pose_matrix(m['pos'], m['quat'])
             if m['frame_id']:
-                T_base_frame = self._tf_matrix(base_frame, m['frame_id'])
-                if T_base_frame is None:
-                    continue  # TF missing this cycle -> skip only this mask
-                T_base_mask = T_base_frame @ T_frame_mask
+                T_base_mask = self._frame_transforms[m['frame_id']] @ T_frame_mask
             else:
                 T_base_mask = T_frame_mask
 

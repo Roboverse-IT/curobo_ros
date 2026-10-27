@@ -126,6 +126,10 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 | `robot_base_frame` | `base_0` | TF frame of the robot base |
 | `mask_margin` | `0.0` | Extra margin (m) around the robot mask |
 | `distance_threshold` | `0.05` | Distance (m) to a collision sphere below which a pixel is masked |
+| `stamp_wait_max_s` | `0.05` | Longest wait (s, steady clock) of a depth frame for the TF and joint states at its stamp; then it is dropped. `0` drops it at once |
+| `joint_state_max_gap_s` | `0.05` | Largest gap (s) between the two joint states around a depth stamp that is still interpolated; a frame in a larger gap is dropped |
+
+The joint states come from the robot descriptor's `strategy_params.joint_states_topic`; the node does not start without it.
 
 ## Robot YAML configuration
 
