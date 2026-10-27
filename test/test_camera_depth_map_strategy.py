@@ -134,6 +134,20 @@ def test_waiting_frame_goes_first_or_is_dropped_when_the_next_arrives(node):
     assert tf_watches(strategy) == 0
 
 
+def test_a_frame_older_than_any_tf_does_not_hold_up_the_next(node):
+    """The camera can start before the robot's TF: no TF ever covers its first frame."""
+    strategy = camera(node, tf_wait_max_s=10.0)
+    publish_tf(strategy, 10, 0.1)
+
+    strategy.callback_depth_map(depth(5))
+    strategy.callback_depth_map(depth(10, nanosec=500_000_000))
+    publish_tf(strategy, 11, 0.3)
+    spin_for(node, 0.02)
+
+    assert integrated_x(node) == pytest.approx([0.2])
+    assert tf_watches(strategy) == 0
+
+
 def test_tf_wait_zero_drops_at_once(node):
     strategy = camera(node, tf_wait_max_s=0)
     publish_tf(strategy, 10, 0.1)

@@ -1,6 +1,8 @@
 """A frame waits, for a bounded time, for the data at its stamp (TF and others)."""
 
 from rclpy.clock import Clock, ClockType
+from rclpy.time import Time
+import tf2_ros
 
 
 class StampWait:
@@ -17,9 +19,11 @@ class StampWait:
     waiting frame is only ever changed by one callback at a time; the TF side
     and notify() (possibly other threads) only read it and trigger the guard
     condition. A TF that arrives while a watch is being registered is seen at
-    the next TF message or the deadline. At most one TF watch is
-    registered with the buffer: tf2 only unregisters a cancelled one on the next
-    TF message, so one per frame would pile up while TF is down.
+    the next TF message or the deadline. At most one TF watch is pending: tf2
+    only unregisters a cancelled one on the next TF message, so one per frame
+    would pile up while TF is down. A pending watch on an older stamp is kept
+    while TF has not reached that stamp (it fires first); once TF has passed it
+    without covering it, it can never fire and is replaced.
     """
 
     def __init__(self, node, tf_buffer, max_wait_s, process, missing_tf,
@@ -43,6 +47,7 @@ class StampWait:
         self._ready = ready
         self._waiting = None  # (item, stamp)
         self._tf_watch = None  # future of the buffer's wait_for_transform_async
+        self._watched = None  # ((target, source), stamp) of _tf_watch
         if max_wait_s > 0.0:
             self._arrived = node.create_guard_condition(
                 self._process_waiting, callback_group=callback_group)
@@ -76,9 +81,37 @@ class StampWait:
     def _watch(self, item, stamp):
         """Trigger _process_waiting once TF covers `stamp`, or an older stamp still watched."""
         missing = self._missing_tf(item, stamp)
-        if missing is not None and (self._tf_watch is None or self._tf_watch.done()):
-            self._tf_watch = self._tf_buffer.wait_for_transform_async(*missing, stamp)
-            self._tf_watch.add_done_callback(lambda _: self._arrived.trigger())
+        if missing is None:
+            return
+        if self._tf_watch is not None and not self._tf_watch.done():
+            if self._fires_first(stamp):
+                return
+            self._tf_watch.cancel()
+        self._tf_watch = self._tf_buffer.wait_for_transform_async(*missing, stamp)
+        self._watched = (missing, stamp)
+        self._tf_watch.add_done_callback(self._on_tf_watch_done)
+
+    def _fires_first(self, stamp):
+        """
+        Return True if the pending watch fires no later than TF covers `stamp`.
+
+        A watch whose stamp TF has passed without covering it never fires: the
+        stamp is older than the first TF received or than the buffer's cache.
+        One on a newer stamp than `stamp` (time went back, e.g. a replay
+        restarted) fires too late.
+        """
+        (target, source), watched = self._watched
+        if watched.nanoseconds > stamp.nanoseconds:  # header stamps carry no clock type
+            return False
+        try:
+            latest = self._tf_buffer.lookup_transform(target, source, Time())
+        except tf2_ros.TransformException:
+            return True  # no TF for the chain yet, so none has passed the stamp
+        return Time.from_msg(latest.header.stamp).nanoseconds < watched.nanoseconds
+
+    def _on_tf_watch_done(self, watch):
+        if not watch.cancelled():
+            self._arrived.trigger()
 
     def _process_waiting(self, superseded=False):
         """Process the waiting frame once its data is there (or at once if superseded)."""
