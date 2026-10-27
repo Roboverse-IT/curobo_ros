@@ -182,6 +182,10 @@ class ConfigWrapperMotion(ConfigWrapper):
         )
 
     def callback_get_collision_distance(self, node, request: GetCollisionDistance, response):
+        # The solvers' world holds the camera data as of the last plan: bring
+        # it up to date first, as a plan does.
+        if hasattr(node, 'refresh_perception_world'):
+            node.refresh_perception_world()
         if request.trajectory:
             return _trajectory_sphere_distance(self, node, response, list(request.trajectory))
         return _compute_sphere_distance(self, node, response)
