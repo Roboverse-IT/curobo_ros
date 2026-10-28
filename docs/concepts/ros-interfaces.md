@@ -175,9 +175,9 @@ Request: bounding box in the robot base frame (metres): `bbox_min_x/y/z`, `bbox_
 
 ### `/unified_planner/get_collision_distance`
 
-Type: `curobo_msgs/srv/GetCollisionDistance`. Returns the collision distance of each robot sphere at the current joint state: `data` (`float32[]`), `nb_sphere` (`int8`, spheres per configuration) and `nb_config` (`1`). The collision world includes the latest camera data: like a plan, the call first recomputes the perception ESDF and pushes it to the solvers.
+Type: `curobo_msgs/srv/GetCollisionDistance`. Returns the collision distance of each robot sphere at the current joint state: `data` (`float32[]`), `nb_sphere` (`int8`, spheres per configuration) and `nb_config` (`1`). The collision world includes the latest camera data and the measured locked joints (see below): like a plan, the call first recomputes the perception ESDF, sets the locked joints, and pushes both to the solvers. The refresh and the query run as one GPU-locked step, so a concurrent plan or MPC step cannot change the world between them. With `joint_states.max_age_s` set, the call returns empty `data` (`nb_config` `0`) while the joint states are older than that.
 
-Optional request `trajectory` (`sensor_msgs/JointState[]`, in the order of the `joint_names` parameter): the same quantity for every configuration, config-major (`data[i * nb_sphere + s]` is sphere `s` at `trajectory[i]`, `nb_config` configurations), evaluated with the planner's model, attached payloads included. The value is cuRobo's collision cost with activation distance `d` (`collision_activation_distance`): `0` while a sphere is farther than `d` from every obstacle, and a sphere penetrates by `value - d/2` once `value` exceeds `d/2`.
+Optional request `trajectory` (`sensor_msgs/JointState[]`, in the order of the `joint_names` parameter): the same quantity for every configuration, config-major (`data[i * nb_sphere + s]` is sphere `s` at `trajectory[i]`, `nb_config` configurations), evaluated with the planner's model, attached payloads included. The current-state query uses the same model. The value is cuRobo's collision cost with activation distance `d` (`collision_activation_distance`): `0` while a sphere is farther than `d` from every obstacle, and a sphere penetrates by `value - d/2` once `value` exceeds `d/2`.
 
 ### `/unified_planner/set_collision_cache`
 

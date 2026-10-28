@@ -17,7 +17,9 @@ class LockedJoints:
     e.g. the gripper at that opening whatever the real one does. update()
     recomputes those transforms for new values, as cuRobo bakes them (forward
     kinematics on the same robot without the locks), and writes them into the
-    model in place.
+    model in place; copy_to() writes them into another model of the robot (a
+    solver's), in place too, so a solver replaying a captured CUDA graph sees
+    them.
     """
 
     def __init__(self, kin_model, robot_config):
@@ -60,13 +62,17 @@ class LockedJoints:
         self._parent = free_config.link_map.to(device=device, dtype=torch.long)[self._child]
 
     def update(self, values):
-        """Set the locked joints to `values`, in `names` order (no work when unchanged)."""
+        """
+        Set the locked joints to `values`, in `names` order.
+
+        Return whether the values changed (no work when they did not).
+        """
         values = [float(v) for v in values]
         if len(values) != len(self.names):
             raise ValueError(f'expected {len(self.names)} values for {self.names}, '
                              f'got {len(values)}')
         if values == self.values:
-            return
+            return False
         fixed = self._config.fixed_transforms
         q = torch.zeros((1, len(self._free.joint_names)), dtype=fixed.dtype, device=fixed.device)
         q[0, self._dofs] = torch.tensor(values, dtype=fixed.dtype, device=fixed.device)
@@ -77,3 +83,21 @@ class LockedJoints:
         child = Pose(position[self._child], quaternion[self._child])
         fixed[self._child] = parent.inverse().multiply(child).get_affine_matrix().to(fixed.dtype)
         self.values = values
+        return True
+
+    def copy_to(self, kinematics_config):
+        """
+        Write the locked joints' transforms into `kinematics_config`, in place.
+
+        kinematics_config is that of another model of the same robot, with the
+        same locks (e.g. a solver's). Only the rows of the links the locked
+        joints move are written: the other links, and the collision spheres,
+        are left as they are.
+        """
+        if not self.names or kinematics_config is self._config:
+            return
+        src, dst = self._config.fixed_transforms, kinematics_config.fixed_transforms
+        if (kinematics_config.link_name_to_idx_map != self._config.link_name_to_idx_map
+                or dst.shape != src.shape):
+            raise ValueError('the model has other links than the one the locked joints are of')
+        dst[self._child] = src[self._child].to(dst.dtype)

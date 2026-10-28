@@ -70,6 +70,24 @@ def test_unresolved_names_are_read_in_publication_order_with_one_warning():
     assert "['shoulder', 'elbow', 'wrist']" in logger.warnings[0]
 
 
+def test_any_reported_joint_is_read_by_name_the_mapped_and_converted_value():
+    feedback = JointFeedback(description({
+        'names': {'finger': 'gripper'},
+        'conversions': {'finger': {'reported': [0.0, 1.0], 'model': [0.0, 0.5]}}}), Logger())
+    assert feedback.read_named(['finger']) is None  # nothing received yet
+    feedback.update(JointState(name=['wrist', 'gripper', 'shoulder', 'elbow'],
+                               position=[3.0, 0.4, 1.0, 2.0]))
+    assert feedback.read_named(['finger', 'wrist']) == [0.2, 3.0]
+    assert feedback.read_named(['finger', 'thumb']) is None  # not reported: no fallback
+    assert feedback.read_named([]) == []
+
+
+def test_named_joints_of_inconsistent_joint_states_are_not_read():
+    feedback = JointFeedback(description(), Logger())
+    feedback.update(JointState(name=['shoulder', 'elbow', 'wrist'], position=[1.0, 2.0]))
+    assert feedback.read_named(['shoulder']) is None
+
+
 def test_before_the_first_joint_state_the_joints_are_zero_and_infinitely_old():
     feedback = JointFeedback(description(), Logger())
     assert feedback.read() == ([0.0] * 3, [0.0] * 3)
@@ -88,6 +106,9 @@ class Strategy:
 
     def get_joint_pose(self):
         return [1.0, 2.0, 3.0]
+
+    def get_joint_positions(self, names):
+        return [0.5] * len(names) if names == ['finger'] else None
 
 
 def context(max_age_s, age):
@@ -108,6 +129,23 @@ def test_joint_states_within_the_limit_are_used(max_age_s, age):
 def test_joint_states_past_the_limit_are_refused(age, said):
     with pytest.raises(ValueError, match=f'/test/js within joint_states.max_age_s .*{said}'):
         context(0.5, age).get_fresh_joint_pose()
+
+
+def test_reported_joints_within_the_limit_are_read_by_name():
+    assert context(0.5, 0.1).get_joint_positions(['finger']) == [0.5]
+    assert context(0.5, 0.1).get_joint_positions(['thumb']) is None
+
+
+def test_reported_joints_past_the_limit_are_refused():
+    with pytest.raises(ValueError, match='0.800 s old'):
+        context(0.5, 0.8).get_joint_positions(['finger'])
+    assert context(0.5, 0.8).get_joint_positions(['thumb']) is None  # nothing read
+
+
+def test_without_a_strategy_no_joint_is_reported():
+    robot = context(0.0, None)
+    robot.robot_strategy = None
+    assert robot.get_joint_positions(['finger']) is None
 
 
 @pytest.fixture
@@ -135,3 +173,4 @@ def test_the_strategy_reads_by_name_and_commands_the_driver_names(node, monkeypa
     assert strategy.get_joint_name() == MODEL
     assert list(sent[0].joint_names) == ['joint_1', 'elbow', 'wrist']
     assert 0.0 <= strategy.get_joint_state_age() < 1.0
+    assert strategy.get_joint_positions(['wrist', 'shoulder']) == [3.0, 1.0]

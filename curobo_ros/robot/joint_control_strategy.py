@@ -95,6 +95,10 @@ class JointCommandStrategy(ABC):
         """Seconds since the driver's latest joint states (None: the strategy has no driver)."""
         return None
 
+    def get_joint_positions(self, names):
+        """Measured positions of the joints `names` (None: the strategy does not report them)."""
+        return None
+
     @abstractmethod
     def get_joint_pose(self):
         ...

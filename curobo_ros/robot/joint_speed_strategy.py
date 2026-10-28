@@ -210,6 +210,10 @@ class JointSpeedStrategy(JointCommandStrategy):
         with self.buffer_lock:
             return self.feedback.age()
 
+    def get_joint_positions(self, names):
+        with self.buffer_lock:
+            return self.feedback.read_named(names)
+
     def stop_robot(self):
         with self.buffer_lock:
             self.vel_command = []

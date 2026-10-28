@@ -145,6 +145,9 @@ class FKServices:
         """Create the FK model and run a warmup batch of the given size."""
         self._node.get_logger().info(f"Initializing FK model (batch_size={batch_size})...")
         self._fk_model = Kinematics(KinematicsCfg.from_robot_yaml_file(self._robot_config_file))
+        # Built from the robot YAML: the node gives it the locked joints' current values.
+        if hasattr(self._node, 'apply_locked_joints'):
+            self._node.apply_locked_joints()
 
         q = torch.rand(
             (batch_size, self._fk_model.get_dof()),

@@ -288,15 +288,35 @@ class RobotContext:
         with self.strategy_lock:
             if self.robot_strategy is None:
                 return [0.0] * self.description.dof
-            max_age_s = self.description.joint_state_map.max_age_s
-            age = self.robot_strategy.get_joint_state_age()
-            if max_age_s > 0 and age is not None and age > max_age_s:
-                topic = self.robot_strategy.params.get('joint_states_topic')
-                raise ValueError(
-                    f'no joint states on {topic} within joint_states.max_age_s '
-                    f'({max_age_s} s): the latest is '
-                    + ('missing' if age == float('inf') else f'{age:.3f} s old'))
+            self._check_fresh()
             return self.robot_strategy.get_joint_pose()
+
+    def get_joint_positions(self, names):
+        """
+        Return the measured positions of the model joints `names` (e.g. the locked ones).
+
+        None when the strategy does not report them all. Refused, as in
+        get_fresh_joint_pose(), when the joint states are too old. Raises
+        ValueError.
+        """
+        with self.strategy_lock:
+            if self.robot_strategy is None:
+                return None
+            positions = self.robot_strategy.get_joint_positions(names)
+            if positions is not None:
+                self._check_fresh()
+            return positions
+
+    def _check_fresh(self):
+        """Raise ValueError if the driver's latest joint states are past max_age_s."""
+        max_age_s = self.description.joint_state_map.max_age_s
+        age = self.robot_strategy.get_joint_state_age()
+        if max_age_s > 0 and age is not None and age > max_age_s:
+            topic = self.robot_strategy.params.get('joint_states_topic')
+            raise ValueError(
+                f'no joint states on {topic} within joint_states.max_age_s '
+                f'({max_age_s} s): the latest is '
+                + ('missing' if age == float('inf') else f'{age:.3f} s old'))
 
     def get_joint_velocity(self):
         """Real, measured joint velocity (driver feedback), if the active

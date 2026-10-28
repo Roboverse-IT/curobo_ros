@@ -608,6 +608,10 @@ class MPCController(ReactiveController):
                 use_cuda_graph=False,
             )
             self._ik_solver = InverseKinematics(cfg)
+            # Built from the robot YAML: the node gives it the robot's current state.
+            self.node.mpc_goal_ik = self._ik_solver
+            if hasattr(self.node, 'apply_solver_states'):
+                self.node.apply_solver_states()
             self.node.get_logger().info("MPC: IK solver for goal-state built (self-collision only)")
         return self._ik_solver
 

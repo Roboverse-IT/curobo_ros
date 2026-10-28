@@ -36,6 +36,7 @@ from curobo_msgs.action import GraspPlan, SendTrajectory
 
 from curobo.types import DeviceCfg, JointState
 
+from curobo_ros.robot.locked_joints import LockedJoints
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.core.config_wrapper_motion import ConfigWrapperMotion
 from curobo_ros.core.attachment_services import AttachmentServices
@@ -203,6 +204,12 @@ class UnifiedPlannerNode(Node):
         # that the kinematics exist (RobotContext is built before the kin model).
         self.robot_context.bind_kinematics(self.config_wrapper_motion.kin_model)
 
+        # The joints the model locks (e.g. a gripper's), at their measured
+        # values in every solver: see refresh_locked_joints.
+        self.locked_joints = LockedJoints(
+            self.config_wrapper_motion.kin_model, self.config_wrapper_motion.robot_config_file)
+        self._locked_unmeasured_logged = False
+
         # The robot as the planner sees it, for clients that plan for it: the
         # joint order of every configuration going in or out (start_pose,
         # target_joint_positions, trajectories) and the tool frames a
@@ -222,6 +229,7 @@ class UnifiedPlannerNode(Node):
         self.joint_space_motion_planner = None  # with joint_space_own_planner
         self.motion_gen = None      # legacy alias, kept for older code paths
         self.mpc = None             # reactive: ModelPredictiveControl
+        self.mpc_goal_ik = None     # MPC's goal IK (self-collision only)
         self.retargeter = None      # reactive: MotionRetargeter (teleop)
 
         # Which solver currently owns the single live CUDA graph. Two captured
@@ -455,13 +463,16 @@ class UnifiedPlannerNode(Node):
         self.apply_obstacle_states()
 
     def _solvers(self):
-        """Every cuRobo solver that exists and receives the world (the ones
-        update_all_solvers_world reaches).
+        """
+        Return every cuRobo solver that exists, labelled.
 
-        Each one builds its own model from the robot YAML: state set on one --
-        an obstacle switched off, a link switched off, an object attached -- is
-        not seen by the others. apply_obstacle_states and
-        apply_robot_sphere_states carry it to all of them.
+        The ones that receive the world (update_all_solvers_world reaches
+        them), and MPC's goal IK (self-collision only). Each one builds its own
+        model from the robot YAML: state set on one -- an obstacle switched
+        off, a link switched off, an object attached, a locked joint's value --
+        is not seen by the others. apply_obstacle_states,
+        apply_robot_sphere_states and apply_locked_joints carry it to all of
+        them.
         """
         # getattr throughout: this also runs while the node is still being
         # built (the first planner warmup), before every solver attribute exists.
@@ -471,6 +482,7 @@ class UnifiedPlannerNode(Node):
             ('joint_space_planner', getattr(self, 'joint_space_motion_planner', None)),
             ('ik_services', getattr(getattr(self, 'ik_services', None), '_ik_solver', None)),
             ('mpc', getattr(self, 'mpc', None)),
+            ('mpc_goal_ik', getattr(self, 'mpc_goal_ik', None)),
             ('retarget_global_ik', getattr(retargeter, '_global_ik_solver', None)),
             ('retarget_local_ik', getattr(retargeter, '_local_ik_solver', None)),
         )
@@ -542,23 +554,87 @@ class UnifiedPlannerNode(Node):
                     failed.append(label)
         return failed
 
+    def apply_locked_joints(self):
+        """
+        Copy the locked joints' values to every solver and the FK model.
+
+        From the node's robot model, where refresh_locked_joints sets them.
+        Returns the ones that refused.
+        """
+        locked = getattr(self, 'locked_joints', None)
+        if locked is None or not locked.names:
+            return []
+        models = [(label, getattr(getattr(solver, 'kinematics', None), 'kinematics_config', None))
+                  for label, solver in self._solvers()]
+        fk_model = getattr(getattr(self, 'fk_services', None), '_fk_model', None)
+        if fk_model is not None:
+            models.append(('fk_services', fk_model.kinematics_config))
+        failed = []
+        with self.gpu_lock:   # a plan in progress reads these transforms
+            for label, kc in models:
+                if kc is None:
+                    continue
+                try:
+                    # in place: a captured CUDA graph keeps reading the same memory
+                    locked.copy_to(kc)
+                except (ValueError, RuntimeError) as e:
+                    self.get_logger().error(f'locked joints in {label}: {e}')
+                    failed.append(label)
+        return failed
+
+    def refresh_locked_joints(self):
+        """
+        Set the locked joints (e.g. a gripper's) to their measured values.
+
+        In the node's robot model and every solver. The values are the robot's
+        joint states, by model joint name (the descriptor's joint_states
+        section maps and converts the driver's). While the joint states do not
+        carry them all, the current values are kept. Raises ValueError when the
+        joint states are older than joint_states.max_age_s.
+        """
+        locked = getattr(self, 'locked_joints', None)
+        if locked is None or not locked.names:
+            return
+        values = self.robot_context.get_joint_positions(locked.names)
+        if values is None:
+            if not self._locked_unmeasured_logged:
+                self._locked_unmeasured_logged = True
+                self.get_logger().warn(
+                    f'The joint states do not report the locked joints {locked.names}: '
+                    f'the planner keeps them at {locked.values}')
+            return
+        self._locked_unmeasured_logged = False
+        with self.gpu_lock:
+            if locked.update(values):
+                self.apply_locked_joints()
+
     def apply_solver_states(self):
-        """Robot and obstacle state onto every solver. For a solver just built:
-        it starts from the robot YAML, with every obstacle switched on."""
+        """
+        Apply the robot and obstacle state to every solver.
+
+        For a solver just built: it starts from the robot YAML, with the locked
+        joints at their configured values and every obstacle switched on.
+        """
+        self.apply_locked_joints()
         self.apply_robot_sphere_states()
         return self.apply_obstacle_states()
 
     def refresh_perception_world(self):
-        """Recompute the perception ESDF and push it to all solvers.
+        """
+        Bring the solvers up to date with the robot and the cameras.
 
-        Called on-demand before each plan (and per step during MPC) so the
-        collision world reflects the latest camera data — no background timer,
-        so no race with CUDA graph capture.
+        The locked joints' measured values (refresh_locked_joints), then the
+        perception ESDF: recomputed and pushed to all solvers. Called on-demand
+        before each plan (and per step during MPC) so the collision world
+        reflects the latest camera data — no background timer, so no race with
+        CUDA graph capture. Raises ValueError when the joint states are older
+        than joint_states.max_age_s.
         """
         obs = self.config_wrapper_motion.obstacle_manager
         # ESDF recompute + world push are GPU ops — hold the lock so they never
         # overlap a concurrent depth integrate / graph capture.
         with self.gpu_lock:
+            self.refresh_locked_joints()
             if obs.refresh_esdf():
                 self.update_all_solvers_world(obs.get_scene())
 
@@ -630,6 +706,7 @@ class UnifiedPlannerNode(Node):
             # mapper.integrate() races the capture -> cudaErrorStreamCaptureInvalidated.
             with self.gpu_lock:
                 result = planner.plan(start_state, request, config, self.robot_context)
+                locked = list(self.locked_joints.values)  # the values planned with
 
             response.success = result.success
             response.message = result.message
@@ -638,7 +715,7 @@ class UnifiedPlannerNode(Node):
             # execute action can reuse it (matching target) without recomputing.
             # Reactive controllers have no trajectory to cache.
             if result.success and planner.is_open_loop():
-                self._store_pending_plan(start_state, request)
+                self._store_pending_plan(start_state, request, locked)
             elif not planner.is_open_loop():
                 self._pending_plan = None
 
@@ -738,6 +815,8 @@ class UnifiedPlannerNode(Node):
             self._setup_planner(planner)
 
             if planner.is_open_loop():
+                # A cached plan is for the locked joints' values it was planned with.
+                self.refresh_locked_joints()
                 reuse = (bool(getattr(goal, 'allow_cached', True))
                          and self._pending_plan_matches(start_state, goal))
                 if reuse:
@@ -1143,16 +1222,20 @@ class UnifiedPlannerNode(Node):
         )
         return start_joint_pose, start_state
 
-    def _store_pending_plan(self, start_state, req):
-        """Cache the just-planned open-loop trajectory's identity for reuse."""
+    def _store_pending_plan(self, start_state, req, locked):
+        """
+        Cache the just-planned open-loop trajectory's identity for reuse.
+
+        ``locked``: the locked joints' values it was planned with.
+        """
         self._pending_plan = {
             'planner': self.planner_manager.get_current_planner_type(),
-            'signature': self._target_signature(start_state, req),
+            'signature': self._target_signature(start_state, req, locked),
             'stamp': time.monotonic(),
         }
 
     def _pending_plan_matches(self, start_state, req) -> bool:
-        """True if the cached plan is fresh and targets the same goal/start."""
+        """Return whether the cached plan is fresh, for the same goal/start and locked joints."""
         pp = self._pending_plan
         if pp is None:
             return False
@@ -1161,7 +1244,8 @@ class UnifiedPlannerNode(Node):
             return False
         if pp['planner'] != self.planner_manager.get_current_planner_type():
             return False
-        return self._signatures_match(pp['signature'], self._target_signature(start_state, req))
+        return self._signatures_match(
+            pp['signature'], self._target_signature(start_state, req, self.locked_joints.values))
 
     @staticmethod
     def _pose_tuple(p):
@@ -1170,7 +1254,7 @@ class UnifiedPlannerNode(Node):
             p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z,
         )
 
-    def _target_signature(self, start_state, req) -> dict:
+    def _target_signature(self, start_state, req, locked) -> dict:
         start = [float(x) for x in start_state.position[0].cpu().tolist()]
         tp = getattr(req, 'target_pose', None)
         poses = getattr(req, 'target_poses', None)
@@ -1181,6 +1265,7 @@ class UnifiedPlannerNode(Node):
             'target_joints': [float(x) for x in (getattr(req, 'target_joint_positions', []) or [])],
             'tool_frames': list(getattr(req, 'target_tool_frames', []) or []),
             'hold_frames': list(getattr(req, 'hold_tool_frames', []) or []),
+            'locked': [float(x) for x in locked],
         }
 
     @staticmethod
@@ -1204,6 +1289,9 @@ class UnifiedPlannerNode(Node):
             return False
         aj, bj = a['target_joints'], b['target_joints']
         if len(aj) != len(bj) or any(abs(x - y) > joint_tol for x, y in zip(aj, bj)):
+            return False
+        al, bl = a['locked'], b['locked']
+        if len(al) != len(bl) or any(abs(x - y) > joint_tol for x, y in zip(al, bl)):
             return False
         if not self._poses_match(a['target_pose'], b['target_pose'], pos_tol, ori_tol):
             return False

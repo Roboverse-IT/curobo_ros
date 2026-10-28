@@ -69,10 +69,10 @@ joint_states:
 
 - `names` also renames the joints in the trajectories sent to the driver.
 - `conversions` is piecewise linear, with the end values held outside the table; `reported` must be strictly increasing.
-- With `max_age_s` set, a plan, an attach or a collision query that starts from the robot's current joints is refused while the newest joint state is older than that (or none has arrived). The default is 0 (no limit).
+- With `max_age_s` set, a plan, an attach or a collision query that starts from the robot's current joints is refused while the newest joint state is older than that (or none has arrived). When the joint states carry the locked joints (below), every plan, execution, grasp and collision query reads them, so it is refused on stale joint states even when it starts from a given configuration. The default is 0 (no limit).
 - If the names still do not resolve, the joint states are read in publication order, with one warning.
 
-Joints that the cuRobo config locks (`lock_joints`, e.g. a gripper's) are read the same way by the segmentation node.
+Joints that the cuRobo config locks (`lock_joints`, e.g. a gripper's) are read the same way, by model name and through `names` and `conversions`. Before each plan, execution, grasp, MPC refresh and collision query, the planner sets them to their measured values in every solver it has built (motion planner, IK, FK, MPC and its goal IK), and solvers built later start from them. A cached plan is reused only for the locked values it was planned with. If the joint states do not carry all the locked joints, the planner keeps their `lock_joints` values and warns once. The segmentation node reads them per image the same way.
 
 Attaching objects needs sphere slots on the attach link: in an XRDF, as many placeholder spheres (radius `-100`) on `attached_object` as the payload may use; in a cuRobo YAML, `extra_collision_spheres: {attached_object: N}`.
 

@@ -64,3 +64,18 @@ class JointFeedback:
         velocity = (list(msg.velocity[:n]) if len(msg.velocity) >= n
                     else [0.0] * len(position))
         return position, velocity
+
+    def read_named(self, names):
+        """
+        Return the positions of the model joints `names`, any of the reported ones.
+
+        None when the joint states do not name them all (or none has arrived):
+        unlike read(), there is no positional fallback.
+        """
+        msg = self._msg
+        if msg is None or len(msg.position) != len(msg.name):
+            return None
+        index = {name: i for i, name in enumerate(msg.name)}
+        if not all(n in index for n in names):
+            return None
+        return [msg.position[index[n]] for n in names]
