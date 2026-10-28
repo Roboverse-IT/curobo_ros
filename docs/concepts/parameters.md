@@ -124,12 +124,27 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 | `depth_image_topic` | `/depth_to_rgb/image_raw` | Input depth image |
 | `camera_info_topic` | `/depth_to_rgb/camera_info` | Camera intrinsics |
 | `robot_base_frame` | `base_0` | TF frame of the robot base |
-| `mask_margin` | `0.0` | Extra margin (m) around the robot mask |
+| `mask_margin` | `0.0` | Extra margin (m) around user-defined masks added through `set_mask` |
 | `distance_threshold` | `0.05` | Distance (m) to a collision sphere below which a pixel is masked |
+| `segmentation_mode` | `sphere` | Robot geometry backend: `sphere`, `mesh`, or their `combined` union |
+| `mesh_link_names` | `[]` | Visual links projected in `mesh`/`combined` mode. Empty uses `kinematics.mesh_link_names`, then `collision_link_names` |
+| `mesh_asset_roots` | `[]` | Existing absolute source roots searched for uninstalled `package://` URDF mesh assets, after the ROS index and cuRobo assets |
+| `mesh_margin` | `0.0` | One-time outward inflation (m) of every selected convex link hull |
+| `mesh_raster_stride` | `8` | Low-resolution projection/raster stride. Smaller is more precise and more expensive |
 | `stamp_wait_max_s` | `0.05` | Longest wait (s, steady clock) of a depth frame for the TF and joint states at its stamp; then it is dropped. `0` drops it at once |
 | `joint_state_max_gap_s` | `0.05` | Largest gap (s) between the two joint states around a depth stamp that is still interpolated; a frame in a larger gap is dropped |
 
 The joint states come from the robot descriptor's `strategy_params.joint_states_topic`; the node does not start without it.
+
+`sphere` is the compatibility default. `mesh` projects cached convex hulls of
+the selected URDF visual meshes and masks their image silhouettes;
+`combined` removes the union. Both backends consume one FK result computed
+from the depth frame's interpolated joint state, including dynamically updated
+locked joints. Mesh loading is robot-independent: `package://` assets resolve
+from installed ROS package shares, cuRobo's bundled robot assets, the optional
+`mesh_asset_roots`, and a source tree next to a generated URDF. Auto-selected
+links with no loadable visual geometry are logged and skipped; explicitly
+requested `mesh_link_names` are strict and fail startup if unavailable.
 
 ## Per-camera depth preprocessing
 

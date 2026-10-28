@@ -329,6 +329,13 @@ Everything published for a depth frame carries that frame's stamp. `/masked_dept
 
 Each depth frame is segmented with the state at its own stamp: the camera and mask-frame TF looked up at the stamp, and the joint positions interpolated at the stamp between the two joint states around it (matched by joint name, so their order and extra joints such as a gripper's do not matter). A frame waits at most `stamp_wait_max_s` for that data; a frame without it (or in a joint-state gap larger than `joint_state_max_gap_s`) is dropped with a warning and nothing is published for it. TF and joint states are received on threads of their own, so they keep arriving while a frame is segmented. Only the newest depth frame is kept: frames that arrive during segmentation are replaced by the next one.
 
+`segmentation_mode` selects collision-sphere point-distance masking (`sphere`,
+the default), projected visual-mesh silhouettes (`mesh`), or their union
+(`combined`). A frame computes FK once and supplies that same synchronized
+state to every enabled backend. See the
+[parameter guide](parameters.md#robot_segmentation-node-parameters) for mesh
+link, asset-resolution, margin, and raster-stride settings.
+
 ## Checking node readiness
 
 The planner builds its solvers synchronously at startup (roughly 25–35 s). Two reliable ways to wait for it:

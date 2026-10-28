@@ -1,28 +1,35 @@
-import torch
-import numpy as np
-
-# ROS2
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
-from sensor_msgs.msg import JointState as JointStateMsg
-from std_msgs.msg import Header
-from visualization_msgs.msg import Marker, MarkerArray
-from cv_bridge import CvBridge, CvBridgeError
-import tf2_ros
+import os
 import struct
 
+import numpy as np
+import torch
+
+# ROS2
+from cv_bridge import CvBridge, CvBridgeError
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from sensor_msgs.msg import JointState as JointStateMsg
+from std_msgs.msg import Header
+import tf2_ros
+from visualization_msgs.msg import Marker, MarkerArray
+
 # cuRobo imports (v2)
+from curobo.config_io import load_yaml
+from curobo.content import get_assets_path
 from curobo.kinematics import Kinematics, KinematicsCfg
 from curobo.types import JointState
 
-from curobo_msgs.srv import SetMask, RemoveObject
+from curobo_msgs.srv import RemoveObject, SetMask
 
 from scipy.spatial.transform import Rotation
 
 from curobo_ros.core.listener_thread import ListenerThread
 from curobo_ros.core.stamp_wait import StampWait
-from curobo_ros.robot.joint_state_history import DEFAULT_JOINT_STATE_MAX_GAP_S, JointStateHistory
+from curobo_ros.perception import (
+    ProjectedMeshMask, resolve_urdf_mesh_paths)
+from curobo_ros.robot.joint_state_history import (
+    DEFAULT_JOINT_STATE_MAX_GAP_S, JointStateHistory)
 from curobo_ros.robot.locked_joints import LockedJoints
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_request_file
@@ -51,6 +58,16 @@ class DepthMapRobotSegmentation(Node):
         # be kept (i.e. considered NOT part of the robot). Was a constructor-only
         # kwarg, unreachable from a launch file — now a runtime-settable param.
         self.declare_parameter('distance_threshold', distance_threshold)
+        # Interchangeable robot geometry backends. Sphere preserves the
+        # historical behavior; mesh projects configured visual geometry;
+        # combined removes the union.
+        self.declare_parameter('segmentation_mode', 'sphere')
+        self.declare_parameter(
+            'mesh_link_names', rclpy.Parameter.Type.STRING_ARRAY)
+        self.declare_parameter(
+            'mesh_asset_roots', rclpy.Parameter.Type.STRING_ARRAY)
+        self.declare_parameter('mesh_margin', 0.0)
+        self.declare_parameter('mesh_raster_stride', 8)
         # A depth frame is segmented with the TF and joint states at its stamp.
         # When they have not all arrived yet it waits, at most this long (s,
         # steady clock); then it is dropped. 0 drops it at once. Covers TF
@@ -62,6 +79,40 @@ class DepthMapRobotSegmentation(Node):
         self.mask_margin = self.get_parameter('mask_margin').get_parameter_value().double_value
         self.distance_threshold = self.get_parameter(
             'distance_threshold').get_parameter_value().double_value
+        self._segmentation_mode = self.get_parameter(
+            'segmentation_mode').get_parameter_value().string_value
+        mesh_links_fallback = rclpy.Parameter(
+            'mesh_link_names', rclpy.Parameter.Type.STRING_ARRAY, [])
+        requested_mesh_links = list(self.get_parameter_or(
+            'mesh_link_names', mesh_links_fallback).value)
+        mesh_roots_fallback = rclpy.Parameter(
+            'mesh_asset_roots', rclpy.Parameter.Type.STRING_ARRAY, [])
+        mesh_asset_roots = list(self.get_parameter_or(
+            'mesh_asset_roots', mesh_roots_fallback).value)
+        mesh_margin = self.get_parameter(
+            'mesh_margin').get_parameter_value().double_value
+        mesh_raster_stride = self.get_parameter(
+            'mesh_raster_stride').get_parameter_value().integer_value
+
+        if self._segmentation_mode not in ('sphere', 'mesh', 'combined'):
+            raise ValueError(
+                "'segmentation_mode' must be sphere, mesh, or combined, got "
+                f'{self._segmentation_mode!r}')
+        if mesh_margin < 0.0:
+            raise ValueError(f"'mesh_margin' must be >= 0, got {mesh_margin}")
+        if mesh_raster_stride < 1:
+            raise ValueError(
+                "'mesh_raster_stride' must be >= 1, got "
+                f'{mesh_raster_stride}')
+        if len(set(requested_mesh_links)) != len(requested_mesh_links):
+            raise ValueError(
+                "'mesh_link_names' contains duplicates: "
+                f'{requested_mesh_links}')
+        for root in mesh_asset_roots:
+            if not os.path.isabs(root) or not os.path.isdir(root):
+                raise ValueError(
+                    "'mesh_asset_roots' entries must be existing absolute "
+                    f'directories, got {root!r}')
 
         stamp_wait_max_s = self.get_parameter('stamp_wait_max_s').get_parameter_value().double_value
         joint_state_max_gap_s = self.get_parameter(
@@ -100,12 +151,87 @@ class DepthMapRobotSegmentation(Node):
 
         # v2: Kinematics replaces CudaRobotModel; from_robot_yaml_file loads the
         # robot YAML directly — no manual load_yaml/RobotConfig.from_dict dance.
-        kin_model = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_config_file))
+        mesh_links = []
+        if self._segmentation_mode == 'sphere':
+            kinematics_cfg = KinematicsCfg.from_robot_yaml_file(
+                robot_config_file)
+        else:
+            # cuRobo loads meshes and returns their poses in the same FK state
+            # only when both fields are set before Kinematics construction.
+            config = load_yaml(robot_config_file)
+            config_robot = config.get('robot_cfg', config)
+            config_kinematics = config_robot.get('kinematics', {})
+            urdf_path = config_kinematics.get('urdf_path')
+            if not urdf_path:
+                raise ValueError(
+                    'Mesh segmentation requires kinematics.urdf_path')
+            asset_root = config_kinematics.get('asset_root_path')
+            if asset_root and not os.path.isabs(asset_root):
+                asset_candidate = os.path.join(get_assets_path(), asset_root)
+                if os.path.isdir(asset_candidate):
+                    asset_root = asset_candidate
+                    config_kinematics['asset_root_path'] = asset_root
+            if not os.path.isabs(urdf_path):
+                urdf_candidates = [
+                    os.path.join(os.path.dirname(robot_config_file), urdf_path),
+                    os.path.join(get_assets_path(), urdf_path),
+                ]
+                if asset_root and os.path.isabs(asset_root):
+                    urdf_candidates.insert(0, os.path.join(asset_root, urdf_path))
+                urdf_path = next(
+                    (path for path in urdf_candidates if os.path.isfile(path)),
+                    urdf_path,
+                )
+            search_roots = list(mesh_asset_roots)
+            if asset_root and os.path.isdir(asset_root):
+                search_roots.append(asset_root)
+            resolved_urdf, unresolved_meshes = resolve_urdf_mesh_paths(
+                urdf_path, search_roots)
+            config_kinematics['urdf_path'] = resolved_urdf
+            if unresolved_meshes:
+                self.get_logger().warning(
+                    'Mesh segmentation could not resolve these URDF assets; '
+                    'auto-selected links using them will be skipped: '
+                    f'{unresolved_meshes}')
+            configured_mesh_links = list(
+                config_kinematics.get('mesh_link_names') or ())
+            mesh_links = requested_mesh_links or configured_mesh_links or list(
+                config_kinematics.get('collision_link_names') or ())
+            if not mesh_links:
+                raise ValueError(
+                    'Mesh segmentation has no links: set mesh_link_names or '
+                    'configure kinematics.mesh_link_names/collision_link_names')
+            config_kinematics['mesh_link_names'] = mesh_links
+            config_kinematics['load_tool_frames_with_mesh'] = True
+            kinematics_cfg = KinematicsCfg.from_robot_yaml_file(config)
+
+        kin_model = Kinematics(kinematics_cfg)
         self._kin_model = kin_model
         # Adopt the canonical joint order/DOF into the shared descriptor, same as
         # unified_planner_node does — makes RobotContext.get_joint_pose()/
         # get_joint_name() DOF-consistent with this node's own kinematics.
         self.robot_context.bind_kinematics(kin_model)
+
+        self._mesh_link_names = mesh_links
+        self._mesh_segmenter = None
+        if self._segmentation_mode in ('mesh', 'combined'):
+            self._mesh_segmenter = ProjectedMeshMask.from_kinematics(
+                kin_model,
+                mesh_links,
+                self._device,
+                margin=mesh_margin,
+                raster_stride=mesh_raster_stride,
+                strict=bool(requested_mesh_links),
+            )
+            self._mesh_link_names = self._mesh_segmenter.link_names
+            if self._mesh_segmenter.skipped_link_names:
+                self.get_logger().info(
+                    'Mesh segmentation skipped links without visual geometry: '
+                    f'{self._mesh_segmenter.skipped_link_names}')
+            self.get_logger().info(
+                f'Robot segmentation mode={self._segmentation_mode}, mesh '
+                f'links={self._mesh_link_names}, margin={mesh_margin:.4f} m, '
+                f'raster_stride={mesh_raster_stride}')
 
         # The joint states come straight from the robot's topic, by name and
         # with their stamps, so each depth frame is segmented with the joints at
@@ -539,40 +665,97 @@ class DepthMapRobotSegmentation(Node):
             'cy': self.camera_info.k[5]
         }
 
-        # Step 1: Convert depth image to point cloud
+        # Compute FK once. Sphere and mesh backends consume this same state, so
+        # both geometries correspond to the depth stamp's interpolated joints.
+        q_batched = q.unsqueeze(0) if q.ndim == 1 else q
+        js = JointState(position=q_batched, joint_names=self._kin_model.joint_names)
+        kinematics_state = self._kin_model.compute_kinematics(js)
+        robot_spheres = kinematics_state.robot_spheres.reshape(-1, 4)
+        self.publish_collision_spheres(robot_spheres)
+
+        # Step 1: Convert depth image to point cloud.
         points, valid_mask = self.depth_to_pointcloud(depth_image, camera_intrinsics)
 
-        # Step 2: Apply robot masking (reuse logic from point cloud segmentation)
-        filtered_points = self._mask_pointcloud(points, q)
+        # Step 2: Apply the sphere backend and the independent analytic object
+        # masks. Mesh-only mode preserves the input pixels when no object masks
+        # are configured instead of doing a needless point-cloud round trip.
+        use_spheres = self._segmentation_mode in ('sphere', 'combined')
+        if use_spheres or self._masks:
+            filtered_points, point_keep, points_base = self._mask_pointcloud(
+                points, kinematics_state, include_spheres=use_spheres)
+            masked_depth = self.pointcloud_to_depth(
+                filtered_points,
+                camera_intrinsics,
+                depth_image.shape)
+        else:
+            points_base = self._transform_points_to_base(points)
+            point_keep = torch.ones(
+                points.shape[0], dtype=torch.bool, device=self._device)
+            masked_depth = depth_image.clone()
 
-        # Step 3: Convert filtered point cloud back to depth image
-        masked_depth = self.pointcloud_to_depth(
-            filtered_points,
-            camera_intrinsics,
-            depth_image.shape)
+        full_mask = torch.zeros_like(depth_image, dtype=torch.bool)
+        full_mask[valid_mask] = ~point_keep
+
+        # Step 3: Project the configured link hulls and union their silhouette
+        # with the sphere/object result.
+        if self._mesh_segmenter is not None:
+            mesh_mask = self._mesh_mask_from_state(
+                depth_image, camera_intrinsics, kinematics_state)
+            masked_depth.masked_fill_(mesh_mask, 0.0)
+            full_mask.logical_or_(mesh_mask)
+
+        if self.robot_pointcloud_pub.get_subscription_count() > 0:
+            masked_points = points_base[full_mask[valid_mask]]
+            if masked_points.shape[0] > 0:
+                robot_frame = self.get_parameter(
+                    'robot_base_frame').get_parameter_value().string_value
+                self.robot_pointcloud_pub.publish(self._create_pointcloud2_msg(
+                    masked_points, robot_frame, self.depth_header.stamp))
 
         return masked_depth
 
-    def _mask_pointcloud(self, point_cloud: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    def _mesh_mask_from_state(self, depth_image, camera_intrinsics,
+                              kinematics_state):
+        """Render configured link poses from one synchronized FK state."""
+        tool_poses = kinematics_state.tool_poses
+        if tool_poses is None:
+            raise RuntimeError('cuRobo FK did not return mesh link poses')
+        missing = [name for name in self._mesh_link_names
+                   if name not in tool_poses.tool_frames]
+        if missing:
+            raise RuntimeError(
+                f'cuRobo FK did not return mesh link poses for {missing}')
+        tool_poses = tool_poses.reorder_links(self._mesh_link_names)
+        positions = tool_poses.position[:, 0, :, :].reshape(-1, 3)
+        quaternions = tool_poses.quaternion[:, 0, :, :].reshape(-1, 4)
+        base_from_camera = self._frame_transforms[self.depth_header.frame_id]
+        intrinsics = (
+            camera_intrinsics['fx'], camera_intrinsics['fy'],
+            camera_intrinsics['cx'], camera_intrinsics['cy'])
+        return self._mesh_segmenter.mask(
+            depth_image,
+            intrinsics,
+            base_from_camera,
+            positions,
+            quaternions,
+        )
+
+    def _mask_pointcloud(self, point_cloud: torch.Tensor, kinematics_state,
+                         include_spheres=True):
         """
         Applies masking operation to remove points belonging to the robot.
         This is the same logic as in the original robot_segmentation.py
 
         Args:
             point_cloud: torch.Tensor of shape (N, 3)
-            q: torch.Tensor of joint positions
+            kinematics_state: cuRobo FK result for the depth stamp
+            include_spheres: whether collision spheres contribute to the mask
 
         Returns:
-            torch.Tensor of filtered points (M, 3) where M <= N
+            Tuple of filtered camera points, keep mask, and base-frame points
         """
-        q = q.unsqueeze(0) if len(q.shape) == 1 else q
-        js = JointState(position=q, joint_names=self._kin_model.joint_names)
-        kinematics_state = self._kin_model.compute_kinematics(js)
         # v2: `robot_spheres` replaces `link_spheres_tensor`, shape [B, H, N, 4]
         robot_spheres = kinematics_state.robot_spheres.reshape(-1, 4)
-
-        # Publish collision spheres for visualization (robot base frame)
-        self.publish_collision_spheres(robot_spheres)
 
         # The point cloud is in the camera optical frame, but robot_spheres are
         # in the robot base frame. Transform the points into the base frame for
@@ -580,16 +763,17 @@ class DepthMapRobotSegmentation(Node):
         # is reconstructed in the camera frame downstream.
         points_base = self._transform_points_to_base(point_cloud)
 
-        points = points_base.unsqueeze(1)  # (N, 1, 3)
-        spheres_centers = robot_spheres[:, :3].unsqueeze(0)  # (1, S, 3)
-        spheres_radii = robot_spheres[:, 3].unsqueeze(0)  # (1, S)
-
-        # Calculate distances from each point to each sphere
-        distances = torch.norm(points - spheres_centers, dim=2) - spheres_radii
-        min_distances, _ = torch.min(distances, dim=1)
-
-        # Keep points that are farther than threshold (i.e. NOT the robot)
-        mask = min_distances > self.distance_threshold
+        if include_spheres:
+            points = points_base.unsqueeze(1)  # (N, 1, 3)
+            spheres_centers = robot_spheres[:, :3].unsqueeze(0)  # (1, S, 3)
+            spheres_radii = robot_spheres[:, 3].unsqueeze(0)  # (1, S)
+            distances = torch.norm(
+                points - spheres_centers, dim=2) - spheres_radii
+            min_distances, _ = torch.min(distances, dim=1)
+            mask = min_distances > self.distance_threshold
+        else:
+            mask = torch.ones(
+                point_cloud.shape[0], dtype=torch.bool, device=self._device)
 
         # Also drop points inside any user-defined mask shape (e.g. a grasped
         # object) so they never reach the mapper / ESDF. Uses the same base-frame
@@ -598,17 +782,7 @@ class DepthMapRobotSegmentation(Node):
         if inside_shapes is not None:
             mask = mask & ~inside_shapes
 
-        # Publish robot point cloud for debug (the points masked OUT as robot),
-        # in the robot base frame to match the transformed coordinates.
-        if self.robot_pointcloud_pub.get_subscription_count() > 0:
-            robot_points = points_base[~mask]  # Points that belong to the robot
-            if robot_points.shape[0] > 0:
-                robot_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-                pc_msg = self._create_pointcloud2_msg(
-                    robot_points, robot_frame, self.depth_header.stamp)
-                self.robot_pointcloud_pub.publish(pc_msg)
-
-        return point_cloud[mask]
+        return point_cloud[mask], mask, points_base
 
     def _transform_points_to_base(self, points: torch.Tensor):
         """Transform camera-frame points (N, 3) into the robot base frame via TF.

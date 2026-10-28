@@ -94,7 +94,25 @@ If the camera sees the robot arm, the arm becomes an "obstacle" for itself. The 
 ros2 run curobo_ros robot_segmentation
 ```
 
-It computes the robot's collision spheres at the joint state of the depth image's stamp, masks every depth pixel within `distance_threshold` (default 0.05 m) of a sphere, and republishes the cleaned image:
+It computes the robot geometry at the joint state of the depth image's stamp
+and republishes the cleaned image. The compatibility default uses collision
+spheres; projected visual meshes and the union of both are also available:
+
+```bash
+# Conservative self-mask: collision spheres plus projected link hulls
+ros2 run curobo_ros robot_segmentation --ros-args \
+  -p segmentation_mode:=combined \
+  -p mesh_margin:=0.004
+```
+
+`mesh_margin` is calibration-dependent; zero is the neutral default. Select a
+subset when only particular links need projected geometry:
+
+```bash
+ros2 run curobo_ros robot_segmentation --ros-args \
+  -p segmentation_mode:=combined \
+  -p mesh_link_names:="[gripper_base, left_finger, right_finger]"
+```
 
 | Interface | Name | Notes |
 |---|---|---|
@@ -104,9 +122,25 @@ It computes the robot's collision spheres at the joint state of the depth image'
 | Publishes | `/collision_spheres`, `/robot_pointcloud_debug` | Debug visualization |
 | Services | `/set_mask`, `/remove_mask` | Extra user-defined masks, optionally riding TF frames |
 
-To use it, point the camera entry's `topic` at `/masked_depth_image` instead of the raw depth topic. Key parameters: `robot_base_frame` (default `base_0`), `mask_margin`.
+To use it, point the camera entry's `topic` at `/masked_depth_image` instead of
+the raw depth topic. `segmentation_mode:=sphere` masks points within
+`distance_threshold` (default 0.05 m) of collision spheres.
+`segmentation_mode:=mesh` projects cached convex hulls of URDF visual meshes;
+`combined` removes the union. Mesh links default to
+`kinematics.mesh_link_names`, then `collision_link_names`; use
+`mesh_link_names` to make the selection explicit. See the
+[parameter reference](../concepts/parameters.md#robot_segmentation-node-parameters)
+for asset roots, geometric margin, and raster stride.
 
 A frame is segmented only with the TF and joint states at its stamp; it waits for them at most `stamp_wait_max_s` (default 0.05 s), and is dropped with a warning otherwise (see [ROS interfaces](../concepts/ros-interfaces.md#robot_segmentation-node)).
+
+Mesh and sphere masks share that single timestamped FK result. The mesh
+backend contains no ROS subscriptions or messages: initialization loads and
+convexifies link-local geometry once, while each frame supplies camera
+intrinsics, `base <- camera`, and link poses for GPU projection/rasterization.
+Installed `package://` assets resolve through the ROS index; cuRobo-bundled
+robot assets and uninstalled source packages can also be found automatically
+or through `mesh_asset_roots`.
 
 ## Tuning
 
@@ -126,6 +160,7 @@ A frame is segmented only with the TF and joint states at its stamp; it waits fo
 | `Could not transform <base> to <frame_id>` warnings | TF extrinsics chosen but the transform isn't published — publish a static TF or hardcode `extrinsics` |
 | Obstacles appear shifted | Wrong extrinsics — re-check the calibration (position *and* quaternion order `[qw, qx, qy, qz]`) |
 | Robot avoids itself / plans fail near the arm | Camera sees the arm — insert `robot_segmentation` (section 4) |
+| Mesh mode skips a link | Its URDF visual mesh is absent/unresolvable. Install the description package, add its source root to `mesh_asset_roots`, or explicitly choose loadable `mesh_link_names` |
 | Nothing appears in the voxel grid | Object outside `mapper_extent_xyz`, or depth encoding not `16UC1`/`32FC1`, or `blox` cache disabled |
 
 ## Next steps

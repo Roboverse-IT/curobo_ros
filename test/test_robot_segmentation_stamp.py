@@ -246,6 +246,63 @@ def test_wait_and_gap_are_validated(param):
         rclpy.shutdown()
 
 
+@pytest.mark.parametrize('param', [
+    'segmentation_mode:=unknown',
+    'mesh_margin:=-0.1',
+    'mesh_raster_stride:=0',
+])
+def test_mesh_configuration_is_validated(param):
+    rclpy.init(args=['--ros-args', '-p', param])
+    try:
+        with pytest.raises(ValueError, match=param.split(':=')[0]):
+            DepthMapRobotSegmentation()
+    finally:
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize('node', [[
+    'robot:=ur10e_xrdf',
+    'robot_base_frame:=base_link',
+    'segmentation_mode:=mesh',
+    'mesh_link_names:=[wrist_3_link]',
+]], indirect=True)
+def test_mesh_backend_loads_selected_robot_geometry(node):
+    assert node._segmentation_mode == 'mesh'
+    assert node._mesh_link_names == ['wrist_3_link']
+    assert node._mesh_segmenter.link_names == ['wrist_3_link']
+    assert node._mesh_segmenter._geometry[0][0].shape[0] > 3
+
+
+def test_mesh_and_combined_modes_select_their_backends(node, monkeypatch):
+    class FakeMesh:
+        pass
+
+    def center_pixel(depth_image, camera_intrinsics, kinematics_state):
+        mask = torch.zeros_like(depth_image, dtype=torch.bool)
+        mask[depth_image.shape[0] // 2, depth_image.shape[1] // 2] = True
+        return mask
+
+    camera_info(node)
+    msg = depth()
+    node.depth_header = msg.header
+    node._frame_transforms = {
+        CAMERA: torch.eye(4, dtype=torch.float32, device='cuda')}
+    node._mesh_segmenter = FakeMesh()
+    monkeypatch.setattr(node, '_mesh_mask_from_state', center_pixel)
+    node.distance_threshold = 100.0
+    image = torch.full((48, 64), 0.8, dtype=torch.float32, device='cuda')
+    q = torch.zeros(
+        len(node._kin_model.joint_names), dtype=torch.float32, device='cuda')
+
+    node._segmentation_mode = 'mesh'
+    mesh_only = node._mask_depth_image(image, q)
+    node._segmentation_mode = 'combined'
+    combined = node._mask_depth_image(image, q)
+
+    assert torch.count_nonzero(mesh_only == 0.0) == 1
+    assert torch.count_nonzero(combined) == 0
+
+
 def test_tf_and_joint_states_are_stored_while_the_node_is_busy(node):
     # Nothing spins the node, as while it segments a frame: TF and joint
     # states still arrive, on their own threads.
