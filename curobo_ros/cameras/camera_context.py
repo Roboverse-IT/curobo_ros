@@ -34,7 +34,8 @@ class CameraContext:
 
     def add_camera(self, camera_name, camera_type, topic, camera_info, frame_id,
                    intrinsics=None, extrinsics=None, frame_rate_hz=None,
-                   tf_wait_max_s=DEFAULT_TF_WAIT_MAX_S, **kwargs):
+                   tf_wait_max_s=DEFAULT_TF_WAIT_MAX_S, depth_filter=None,
+                   **kwargs):
         """
         Add a camera strategy to the context.
 
@@ -50,6 +51,7 @@ class CameraContext:
                 to normalise the TSDF decay (see get_total_frame_rate_hz).
             tf_wait_max_s: How long a depth frame waits for the TF at its stamp
                 (see DepthMapCameraStrategy).
+            depth_filter: Optional per-camera cuRobo FilterDepth configuration.
             **kwargs: Additional parameters for specific camera strategies
         """
         # v2 perception ingests depth+rgb images through the Mapper TSDF; raw
@@ -66,7 +68,8 @@ class CameraContext:
                 frame_id=frame_id,
                 intrinsics=intrinsics,
                 extrinsics=extrinsics,
-                tf_wait_max_s=tf_wait_max_s
+                tf_wait_max_s=tf_wait_max_s,
+                depth_filter=depth_filter,
             )
 
         else:

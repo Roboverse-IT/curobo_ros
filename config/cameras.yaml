@@ -35,3 +35,15 @@ cameras:
     # publish period later). It is dropped after that; 0 = drop at once.
     # Default 0.05, enough for TF published at 20 Hz or faster.
     tf_wait_max_s: 0.05
+    # Optional cuRobo FilterDepth preprocessing, applied after any upstream
+    # robot/object masking and immediately before Mapper.integrate(). Disabled
+    # by default for backward compatibility. null disables the flying-pixel or
+    # bilateral stage; bilateral values below are cuRobo's defaults.
+    depth_filter:
+      enabled: false
+      depth_min: 0.15
+      depth_max: 2.0
+      flying_pixel_threshold: 0.5
+      bilateral_kernel_size: 5
+      bilateral_sigma_spatial: 10.0
+      bilateral_sigma_depth: 0.1

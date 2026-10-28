@@ -131,6 +131,28 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 
 The joint states come from the robot descriptor's `strategy_params.joint_states_topic`; the node does not start without it.
 
+## Per-camera depth preprocessing
+
+Each `depth_camera` entry in `cameras.yaml` accepts an optional `depth_filter`
+mapping. It is applied after any upstream robot/object masking and immediately
+before `Mapper.integrate()`:
+
+```yaml
+depth_filter:
+  enabled: true
+  depth_min: 0.15
+  depth_max: 2.0
+  flying_pixel_threshold: 0.5  # null disables this stage
+  bilateral_kernel_size: 5     # null disables this stage; otherwise positive odd
+  bilateral_sigma_spatial: 10.0
+  bilateral_sigma_depth: 0.1
+```
+
+The filter is disabled when the mapping or `enabled` is omitted, preserving
+the source depth. The range, flying-pixel, and bilateral settings are passed
+to cuRobo `FilterDepth`; invalid and out-of-range pixels become zero before
+TSDF integration.
+
 ## Robot YAML configuration
 
 The cuRobo robot configuration (for the Doosan M1013: `curobo_doosan/src/m1013/m1013.yml`) defines kinematics (`urdf_path`, `base_link`, `ee_link`), the cspace with joint limits (position/velocity/acceleration/jerk), and the collision spheres. This is also where the robot's *speed* is set — scale the cspace velocity/acceleration/jerk limits and rebuild with `update_motion_gen_config`.

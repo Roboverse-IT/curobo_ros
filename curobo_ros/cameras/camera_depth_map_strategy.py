@@ -16,6 +16,16 @@ import numpy as np
 # down to 20 Hz: the TF sample after the stamp then arrives at most 50 ms later.
 DEFAULT_TF_WAIT_MAX_S = 0.05
 
+_DEPTH_FILTER_DEFAULTS = {
+    'enabled': False,
+    'depth_min': 0.1,
+    'depth_max': 10.0,
+    'flying_pixel_threshold': 0.5,
+    'bilateral_kernel_size': 5,
+    'bilateral_sigma_spatial': 10.0,
+    'bilateral_sigma_depth': 0.1,
+}
+
 
 class DepthMapCameraStrategy(CameraStrategy):
     '''
@@ -29,7 +39,8 @@ class DepthMapCameraStrategy(CameraStrategy):
                  frame_id='',
                  intrinsics=None,
                  extrinsics=None,
-                 tf_wait_max_s=DEFAULT_TF_WAIT_MAX_S
+                 tf_wait_max_s=DEFAULT_TF_WAIT_MAX_S,
+                 depth_filter=None,
                  ):
         """
         Initialize a depthmap camera strategy.
@@ -48,6 +59,10 @@ class DepthMapCameraStrategy(CameraStrategy):
                 the TF at its stamp when that TF has not arrived yet; the frame
                 is dropped after it. 0 drops it at once. Unused with static
                 extrinsics.
+            depth_filter: Optional FilterDepth configuration. ``enabled`` is
+                false by default, preserving the input depth exactly. The
+                remaining keys expose cuRobo's range, flying-pixel and
+                bilateral-filter settings.
         """
         super().__init__(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics)
 
@@ -62,6 +77,8 @@ class DepthMapCameraStrategy(CameraStrategy):
                 f"Camera '{camera_name}': 'tf_wait_max_s' must be a number >= 0, "
                 f'got {tf_wait_max_s!r}')
         self._tf_wait_max_s = float(tf_wait_max_s)
+        self._depth_filter_config = self._parse_depth_filter(depth_filter)
+        self._depth_filter = None
 
         # Robot base frame for the camera-pose TF lookup. Read from the node's
         # 'base_link' parameter (the planner's configurable base frame) instead
@@ -125,6 +142,98 @@ class DepthMapCameraStrategy(CameraStrategy):
 
         node.get_logger().info(f"DepthMap camera initialized with depth topic: {topic}")
 
+    def _parse_depth_filter(self, config):
+        """Validate one camera's optional cuRobo FilterDepth configuration."""
+        if config is None:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError(
+                f"Camera '{self.name}': 'depth_filter' must be a mapping, got "
+                f'{type(config).__name__}')
+        unknown = set(config) - set(_DEPTH_FILTER_DEFAULTS)
+        if unknown:
+            raise ValueError(
+                f"Camera '{self.name}': unknown depth_filter keys: "
+                f'{sorted(unknown)}')
+
+        parsed = {**_DEPTH_FILTER_DEFAULTS, **config}
+        if not isinstance(parsed['enabled'], bool):
+            raise ValueError(
+                f"Camera '{self.name}': depth_filter.enabled must be a "
+                'boolean')
+
+        for key in ('depth_min', 'depth_max', 'bilateral_sigma_spatial',
+                    'bilateral_sigma_depth'):
+            value = parsed[key]
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(
+                    f"Camera '{self.name}': depth_filter.{key} must be a "
+                    'number, '
+                    f'got {value!r}')
+            parsed[key] = float(value)
+        if parsed['depth_min'] < 0.0:
+            raise ValueError(
+                f"Camera '{self.name}': depth_filter.depth_min must be >= 0")
+        if parsed['depth_max'] <= parsed['depth_min']:
+            raise ValueError(
+                f"Camera '{self.name}': depth_filter.depth_max must be "
+                'greater than depth_min')
+        for key in ('bilateral_sigma_spatial', 'bilateral_sigma_depth'):
+            if parsed[key] <= 0.0:
+                raise ValueError(
+                    f"Camera '{self.name}': depth_filter.{key} must be > 0")
+
+        flying = parsed['flying_pixel_threshold']
+        if flying is not None:
+            if (
+                not isinstance(flying, (int, float))
+                or isinstance(flying, bool)
+                or not 0.0 <= float(flying) <= 1.0
+            ):
+                raise ValueError(
+                    f"Camera '{self.name}': "
+                    'depth_filter.flying_pixel_threshold '
+                    f'must be null or a number in [0, 1], got {flying!r}')
+            parsed['flying_pixel_threshold'] = float(flying)
+
+        kernel = parsed['bilateral_kernel_size']
+        if kernel is not None and (
+                not isinstance(kernel, int) or isinstance(kernel, bool)
+                or kernel <= 0 or kernel % 2 == 0):
+            raise ValueError(
+                f"Camera '{self.name}': depth_filter.bilateral_kernel_size "
+                f'must be null or a positive odd integer, got {kernel!r}')
+        return parsed
+
+    def _filter_depth(self, depth_tensor):
+        """Apply the filter, creating its shape-specific buffers lazily."""
+        config = self._depth_filter_config
+        if not config['enabled']:
+            return depth_tensor
+        image_shape = tuple(depth_tensor.shape)
+        if (
+            self._depth_filter is None
+            or self._depth_filter.image_shape != image_shape
+        ):
+            from curobo.perception import FilterDepth
+
+            self._depth_filter = FilterDepth(
+                image_shape=image_shape,
+                depth_minimum_distance=config['depth_min'],
+                depth_maximum_distance=config['depth_max'],
+                flying_pixel_threshold=config['flying_pixel_threshold'],
+                bilateral_kernel_size=config['bilateral_kernel_size'],
+                bilateral_sigma_spatial=config['bilateral_sigma_spatial'],
+                bilateral_sigma_depth=config['bilateral_sigma_depth'],
+                device=str(self.tensor_args.device),
+            )
+            self.node.get_logger().info(
+                f"Camera '{self.name}' FilterDepth initialized for "
+                f'{image_shape}: '
+                f'{self._depth_filter.config}')
+        filtered, _ = self._depth_filter(
+            torch.nan_to_num(depth_tensor, nan=0.0).unsqueeze(0))
+        return filtered[0]
 
     def callback_depth_map(self, msg):
         """
@@ -234,6 +343,7 @@ class DepthMapCameraStrategy(CameraStrategy):
             try:
                 depth_tensor = torch.from_numpy(depth_img_float).to(
                     device=self.tensor_args.device, dtype=self.tensor_args.dtype)
+                depth_tensor = self._filter_depth(depth_tensor)
 
                 if isinstance(pose, Pose):
                     self.camera_pose = pose

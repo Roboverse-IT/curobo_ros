@@ -37,10 +37,11 @@ def node():
     rclpy.shutdown()
 
 
-def camera(node, frame_id=CAMERA, extrinsics=None, tf_wait_max_s=0.05):
+def camera(node, frame_id=CAMERA, extrinsics=None, tf_wait_max_s=0.05,
+           depth_filter=None):
     return DepthMapCameraStrategy(
         node, 'cam', topic='/cam/depth', frame_id=frame_id, intrinsics=K, extrinsics=extrinsics,
-        tf_wait_max_s=tf_wait_max_s)
+        tf_wait_max_s=tf_wait_max_s, depth_filter=depth_filter)
 
 
 def spin_for(node, seconds):
@@ -68,6 +69,17 @@ def depth(sec, nanosec=0, frame_id=CAMERA):
     msg.data = np.full((4, 4), 1000, dtype=np.uint16).tobytes()
     msg.header.stamp = Time(sec=sec, nanosec=nanosec)
     msg.header.frame_id = frame_id
+    return msg
+
+
+def depth_float(values, sec=10):
+    """Build a 32-bit floating-point depth image."""
+    values = np.asarray(values, dtype=np.float32)
+    msg = Image(
+        height=values.shape[0], width=values.shape[1], encoding='32FC1',
+        step=values.shape[1] * 4, data=values.tobytes())
+    msg.header.stamp = Time(sec=sec)
+    msg.header.frame_id = CAMERA
     return msg
 
 
@@ -181,3 +193,101 @@ def test_frame_id_and_tf_wait_are_validated(node):
         camera(node, tf_wait_max_s=-0.1)
     with pytest.raises(ValueError, match='tf_wait_max_s'):
         camera(node, tf_wait_max_s='0.05')
+
+
+def test_depth_filter_matches_curobo_filter_depth(node):
+    """The configured camera path must equal direct cuRobo filtering."""
+    from curobo.perception import FilterDepth
+
+    config = {
+        'enabled': True,
+        'depth_min': 0.15,
+        'depth_max': 2.0,
+        'flying_pixel_threshold': 0.5,
+        'bilateral_kernel_size': 5,
+        'bilateral_sigma_spatial': 10.0,
+        'bilateral_sigma_depth': 0.1,
+    }
+    strategy = camera(
+        node, extrinsics=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        depth_filter=config)
+    raw = np.full((8, 8), 0.8, dtype=np.float32)
+    raw[0, 0], raw[0, 1], raw[3, 3], raw[7, 7] = 0.05, 3.0, np.nan, 1.4
+
+    strategy.callback_depth_map(depth_float(raw))
+
+    direct = FilterDepth(
+        image_shape=raw.shape,
+        depth_minimum_distance=config['depth_min'],
+        depth_maximum_distance=config['depth_max'],
+        flying_pixel_threshold=config['flying_pixel_threshold'],
+        bilateral_kernel_size=config['bilateral_kernel_size'],
+        bilateral_sigma_spatial=config['bilateral_sigma_spatial'],
+        bilateral_sigma_depth=config['bilateral_sigma_depth'],
+        device='cuda')
+    expected, _ = direct(torch.nan_to_num(
+        torch.from_numpy(raw).to(device='cuda'), nan=0.0).unsqueeze(0))
+    integrated = node.mapper.observations[-1].depth_image
+    torch.testing.assert_close(integrated, expected)
+    assert integrated[0, 0, 0] == 0.0
+    assert integrated[0, 0, 1] == 0.0
+
+
+def test_depth_filter_is_disabled_by_default(node):
+    """Omitting the filter must preserve every source depth value."""
+    strategy = camera(
+        node, extrinsics=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+    raw = np.array([[0.05, 3.0], [np.nan, 0.8]], dtype=np.float32)
+
+    strategy.callback_depth_map(depth_float(raw))
+
+    integrated = node.mapper.observations[-1].depth_image.cpu().numpy()[0]
+    np.testing.assert_allclose(integrated, raw, equal_nan=True)
+
+
+@pytest.mark.parametrize('config, match', [
+    ({'enabled': 'yes'}, 'enabled'),
+    ({'depth_min': 2.0, 'depth_max': 1.0}, 'depth_max'),
+    ({'flying_pixel_threshold': 1.1}, 'flying_pixel_threshold'),
+    ({'bilateral_kernel_size': 4}, 'bilateral_kernel_size'),
+    ({'unknown': 1}, 'unknown depth_filter keys'),
+])
+def test_depth_filter_configuration_is_validated(node, config, match):
+    """Reject unsafe or unsupported FilterDepth settings at startup."""
+    with pytest.raises(ValueError, match=match):
+        camera(node, depth_filter=config)
+
+
+def test_camera_yaml_routes_depth_filter_to_the_strategy(node, tmp_path):
+    """Load the complete per-camera filter mapping from cameras.yaml."""
+    from curobo_ros.core.camera_system_manager import CameraSystemManager
+
+    config = tmp_path / 'cameras.yaml'
+    config.write_text(f"""cameras:
+  - name: filtered
+    type: depth_camera
+    topic: /filtered/depth
+    frame_id: {CAMERA}
+    intrinsics: {K}
+    extrinsics: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    frame_rate_hz: 30.0
+    depth_filter:
+      enabled: true
+      depth_min: 0.2
+      depth_max: 1.5
+      flying_pixel_threshold: null
+      bilateral_kernel_size: null
+""")
+
+    manager = CameraSystemManager(node, str(config))
+
+    strategy = manager.camera_context.cameras['filtered']
+    assert strategy._depth_filter_config == {
+        'enabled': True,
+        'depth_min': 0.2,
+        'depth_max': 1.5,
+        'flying_pixel_threshold': None,
+        'bilateral_kernel_size': None,
+        'bilateral_sigma_spatial': 10.0,
+        'bilateral_sigma_depth': 0.1,
+    }

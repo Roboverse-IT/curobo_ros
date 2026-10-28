@@ -66,6 +66,7 @@ class CameraSystemManager:
                     camera_extrinsics = camera.get("extrinsics", None)
                     camera_frame_rate = self._parse_frame_rate(camera, camera_name)
                     camera_tf_wait = camera.get('tf_wait_max_s', DEFAULT_TF_WAIT_MAX_S)
+                    camera_depth_filter = camera.get('depth_filter', None)
 
                     # Add camera with appropriate type
                     self.camera_context.add_camera(
@@ -77,7 +78,8 @@ class CameraSystemManager:
                         intrinsics=camera_intrinsics,
                         extrinsics=camera_extrinsics,
                         frame_rate_hz=camera_frame_rate,
-                        tf_wait_max_s=camera_tf_wait
+                        tf_wait_max_s=camera_tf_wait,
+                        depth_filter=camera_depth_filter,
                     )
 
                 self.node.get_logger().info(f"Successfully loaded {len(camera_config['cameras'])} camera(s)")
