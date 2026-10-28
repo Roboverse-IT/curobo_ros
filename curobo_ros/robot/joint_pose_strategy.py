@@ -6,6 +6,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32
 
 from curobo_ros.robot.joint_control_strategy import JointCommandStrategy, RobotState
+from curobo_ros.robot.joint_feedback import JointFeedback
 
 
 class JointPoseStrategy(JointCommandStrategy):
@@ -32,19 +33,19 @@ class JointPoseStrategy(JointCommandStrategy):
                 Float32, state_topic, self.callback_trajectory_state, 10,
                 callback_group=MutuallyExclusiveCallbackGroup())
 
+        self.feedback = JointFeedback(description, node.get_logger())
         joint_states_topic = self.params.get('joint_states_topic')
         if joint_states_topic:
             self.sub_joint_state = node.create_subscription(
                 JointState, joint_states_topic, self.callback_joint_pose, 10,
                 callback_group=MutuallyExclusiveCallbackGroup())
 
-        self.joint_pose = [0.0] * self.dof
-
     def send_trajectrory(self):
         with self.buffer_lock:
             self.robot_state = RobotState.RUNNING
             msg = JointTrajectory()
-            msg.joint_names = self.joint_names
+            msg.joint_names = self.description.joint_state_map.driver_names(self.joint_names) \
+                if self.description is not None else list(self.joint_names)
 
             if len(self.position_command) == 0:
                 self.trajectory_progression = 1.0
@@ -65,7 +66,16 @@ class JointPoseStrategy(JointCommandStrategy):
 
     def get_joint_pose(self):
         with self.buffer_lock:
-            return list(self.joint_pose)
+            return self.feedback.read()[0]
+
+    def get_joint_name(self):
+        """Return the model's joint names, the order of get_joint_pose()."""
+        with self.buffer_lock:
+            return self.feedback.names
+
+    def get_joint_state_age(self):
+        with self.buffer_lock:
+            return self.feedback.age()
 
     def stop_robot(self):
         with self.buffer_lock:
@@ -82,14 +92,8 @@ class JointPoseStrategy(JointCommandStrategy):
             self.trajectory_progression = msg.data
 
     def callback_joint_pose(self, msg):
-        # Positional read in the driver's publication order (DOF-agnostic) — see
-        # JointSpeedStrategy.callback_joint_pose: driver names may not match the
-        # curobo cspace names, so a by-name remap would drop every joint.
-        n = self.dof or len(msg.position)
         with self.buffer_lock:
-            self.joint_pose = list(msg.position[:n])
-            if msg.name:
-                self.joint_names = list(msg.name[:n])
+            self.feedback.update(msg)
 
     def get_progression(self):
         with self.buffer_lock:

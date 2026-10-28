@@ -207,9 +207,16 @@ def _compute_sphere_distance(wrapper, node, response):
     `CollisionBuffer`, and `weight`/`activation_distance` tensors — there is
     no `compute_esdf` kwarg.
     """
+    try:
+        joint_pose = wrapper.robot.get_fresh_joint_pose()
+    except ValueError as ex:
+        node.get_logger().error(f'get_collision_distance: {ex}')
+        response.nb_sphere = 0
+        response.data = []
+        return response
     q_js = JointState(
         position=torch.tensor(
-            wrapper.robot.get_joint_pose(),
+            joint_pose,
             dtype=wrapper._ops_dtype,
             device=wrapper._device,
         ),

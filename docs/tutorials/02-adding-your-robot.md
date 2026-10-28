@@ -55,6 +55,25 @@ A bare `curobo_config` name that does not exist next to the descriptor is one of
 
 `apply_curobo_patches: true` applies the fixes in `curobo_ros/core/curobo_patches.py` before any solver is built: disabling a *mesh* obstacle (which cuRobo v0.8.0 cannot do when a cuboid cache exists, and which attaching a mesh object relies on), a joint reindex that fails when locked joints precede the active ones in the chain, and `plan_grasp` start states that carry a trajectory `dt` (it makes the IK fail from then on). Off by default.
 
+### The driver's joint states
+
+The joint states on `joint_states_topic` are read by joint name, in any order and among other joints. Where the driver differs from the cuRobo model, an optional `joint_states` section maps it:
+
+```yaml
+joint_states:
+  names: {joint1: joint_1}         # model joint: the name the driver publishes
+  conversions:                     # model joint: driver value -> model value
+    finger_joint: {reported: [0.0, 0.3, 0.689], model: [-0.074, 0.287, 0.700]}
+  max_age_s: 0.5                   # oldest joint state a plan may start from
+```
+
+- `names` also renames the joints in the trajectories sent to the driver.
+- `conversions` is piecewise linear, with the end values held outside the table; `reported` must be strictly increasing.
+- With `max_age_s` set, a plan, an attach or a collision query that starts from the robot's current joints is refused while the newest joint state is older than that (or none has arrived). The default is 0 (no limit).
+- If the names still do not resolve, the joint states are read in publication order, with one warning.
+
+Joints that the cuRobo config locks (`lock_joints`, e.g. a gripper's) are read the same way by the segmentation node.
+
 Attaching objects needs sphere slots on the attach link: in an XRDF, as many placeholder spheres (radius `-100`) on `attached_object` as the payload may use; in a cuRobo YAML, `extra_collision_spheres: {attached_object: N}`.
 
 ## 2. The cuRobo robot configuration

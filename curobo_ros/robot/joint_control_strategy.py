@@ -32,7 +32,8 @@ class JointCommandStrategy(ABC):
         # Robot driver topics (empty dict-safe): the descriptor is the source.
         self.params = dict(description.strategy_params) if description is not None else {}
 
-        # Joint names: descriptor fallback (cspace) until real joint_states arrive.
+        # The command buffer's joint names (set_command()); the description's
+        # until the first command.
         self.joint_names = list(description.joint_names) if description is not None else []
         self.dof = len(self.joint_names)
 
@@ -47,9 +48,7 @@ class JointCommandStrategy(ABC):
 
         # Guards position_command/vel_command/accel_command/command_index/
         # joint_names/trajectory_progression/robot_state, plus any feedback
-        # fields a subclass adds (joint_pose/joint_velocity/
-        # current_joint_positions) — same callback that rewrites joint_names
-        # usually rewrites those together. RLock: the atomic
+        # a subclass adds (feedback/current_joint_positions). RLock: the atomic
         # RobotContext.set_and_send_command() holds it across a nested
         # set_command()+send_trajectrory() pair. Rank: below strategy_lock,
         # above nothing (leaf) — see robot_context.py's lock-order docstring.
@@ -91,6 +90,10 @@ class JointCommandStrategy(ABC):
         velocity feedback (e.g. EmulatorStrategy has no physical driver).
         """
         return [0.0] * self.dof
+
+    def get_joint_state_age(self):
+        """Seconds since the driver's latest joint states (None: the strategy has no driver)."""
+        return None
 
     @abstractmethod
     def get_joint_pose(self):

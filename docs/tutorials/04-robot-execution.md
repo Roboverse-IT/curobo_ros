@@ -83,7 +83,7 @@ Safety notes for hardware:
    ```
 
 2. Your driver side must consume `JointTrajectory` chunks and report progress as a `Float32` (0→1) — the `leeloo` bridge is the reference implementation.
-3. Joint *ordering* between your driver and the cuRobo cspace must match; remap in your bridge if the driver uses a different order.
+3. Joint states are read by name, and trajectories carry the cuRobo joint names in cspace order. If your driver uses other names or units, map them in the descriptor's `joint_states` section ([Tutorial 2](02-adding-your-robot.md#the-drivers-joint-states)).
 4. Validate on `emulator` first, then dry-run `joint_speed` with the arm in free space.
 
 ## Troubleshooting

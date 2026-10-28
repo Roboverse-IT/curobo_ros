@@ -1116,8 +1116,10 @@ class UnifiedPlannerNode(Node):
     def _resolve_start_state(self, src):
         """Return (start_joint_list, start_state) from a request/goal start_pose.
 
-        Falls back to the robot's current joint pose when start_pose is empty.
-        Shared by the generate_trajectory service and the execute action.
+        Falls back to the robot's current joint pose when start_pose is empty;
+        raises ValueError when that is older than the descriptor allows (see
+        RobotContext.get_fresh_joint_pose). Shared by the generate_trajectory
+        service and the execute action.
         """
         start_pose = getattr(src, 'start_pose', None)
         if start_pose is not None and len(start_pose.position) > 0:
@@ -1127,7 +1129,7 @@ class UnifiedPlannerNode(Node):
                 f"{[f'{x:.3f}' for x in start_joint_pose]}"
             )
         else:
-            start_joint_pose = self.robot_context.get_joint_pose()
+            start_joint_pose = self.robot_context.get_fresh_joint_pose()
             self.get_logger().info(
                 f"Using robot current position: "
                 f"{[f'{x:.3f}' for x in start_joint_pose]}"

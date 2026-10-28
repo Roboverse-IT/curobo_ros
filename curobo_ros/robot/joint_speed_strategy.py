@@ -10,6 +10,7 @@ from std_msgs.msg import Float32
 
 from curobo_ros.robot.joint_control_strategy import JointCommandStrategy, RobotState
 from curobo_ros.core.diagnostics import open_diag_csv
+from curobo_ros.robot.joint_feedback import JointFeedback
 
 
 class JointSpeedStrategy(JointCommandStrategy):
@@ -68,24 +69,22 @@ class JointSpeedStrategy(JointCommandStrategy):
                 Float32, state_topic, self.callback_trajectory_state, 10,
                 callback_group=MutuallyExclusiveCallbackGroup())
 
+        # Driver feedback: positions and velocities are both
+        # REAL driver measurements — dsr_hw_interface2.cpp's read() populates
+        # joint_position_ and joint_velocities_ from the SAME real-time
+        # struct (data->actual_joint_position / actual_joint_velocity), same
+        # source, same rate. (Earlier assumption that velocity feedback
+        # wasn't reliable was wrong — verified against the driver source.)
+        self.feedback = JointFeedback(description, node.get_logger())
         joint_states_topic = self.params.get('joint_states_topic')
         if joint_states_topic:
             self.sub_joint_state = node.create_subscription(
                 JointState, joint_states_topic, self.callback_joint_pose, 10,
                 callback_group=MutuallyExclusiveCallbackGroup())
 
-        # Current feedback (sized to the robot's DOF, DOF-agnostic). Both are
-        # REAL driver measurements — dsr_hw_interface2.cpp's read() populates
-        # joint_position_ and joint_velocities_ from the SAME real-time
-        # struct (data->actual_joint_position / actual_joint_velocity), same
-        # source, same rate. (Earlier assumption that velocity feedback
-        # wasn't reliable was wrong — verified against the driver source.)
-        self.joint_pose = [0.0] * self.dof
-        self.joint_velocity = [0.0] * self.dof
-
     def _clamp_velocities(self, vel_list):
         """Hard-limit joint acceleration relative to the REAL, measured
-        current velocity (self.joint_velocity), regardless of what the
+        current velocity (get_joint_velocity()), regardless of what the
         planner produced.
 
         Earlier versions ramped from an assumed "last commanded" value (first
@@ -105,7 +104,7 @@ class JointSpeedStrategy(JointCommandStrategy):
         """
         max_dv = self._max_accel_rad_s2 * self._accel_clamp_dt
         clamped = []
-        prev = list(self.joint_velocity)
+        prev = self.get_joint_velocity()
         for v in vel_list:
             row = [pi + max(-max_dv, min(max_dv, vi - pi)) for vi, pi in zip(v, prev)]
             clamped.append(row)
@@ -144,7 +143,7 @@ class JointSpeedStrategy(JointCommandStrategy):
         if self._debug_csv is None:
             return
         deg = math.degrees
-        real = self.joint_velocity
+        real = self.get_joint_velocity()
         p0 = vel_clamped[0] if vel_clamped else [0.0] * self.dof
         raw0 = self.vel_command[0] if self.vel_command else [0.0] * self.dof
         # Delta actually published vs. measured real velocity -- what the clamp
@@ -167,7 +166,8 @@ class JointSpeedStrategy(JointCommandStrategy):
         with self.buffer_lock:
             self.robot_state = RobotState.RUNNING
             msg = JointTrajectory()
-            msg.joint_names = self.joint_names
+            msg.joint_names = self.description.joint_state_map.driver_names(self.joint_names) \
+                if self.description is not None else list(self.joint_names)
 
             if len(self.position_command) == 0:
                 self.trajectory_progression = 1.0
@@ -195,11 +195,20 @@ class JointSpeedStrategy(JointCommandStrategy):
 
     def get_joint_pose(self):
         with self.buffer_lock:
-            return list(self.joint_pose)
+            return self.feedback.read()[0]
 
     def get_joint_velocity(self):
         with self.buffer_lock:
-            return list(self.joint_velocity)
+            return self.feedback.read()[1]
+
+    def get_joint_name(self):
+        """Return the model's joint names, the order of get_joint_pose()."""
+        with self.buffer_lock:
+            return self.feedback.names
+
+    def get_joint_state_age(self):
+        with self.buffer_lock:
+            return self.feedback.age()
 
     def stop_robot(self):
         with self.buffer_lock:
@@ -217,17 +226,8 @@ class JointSpeedStrategy(JointCommandStrategy):
             self.trajectory_progression = msg.data
 
     def callback_joint_pose(self, msg):
-        # Positional read in the driver's publication order (DOF-agnostic). The
-        # driver's joint names (e.g. on /dsr01/joint_states) need NOT match the
-        # curobo cspace names, so a by-name remap would wrongly drop every joint
-        # and yield an empty q. curobo only needs the right count/order.
-        n = self.dof or len(msg.position)
         with self.buffer_lock:
-            self.joint_pose = list(msg.position[:n])
-            if msg.velocity:
-                self.joint_velocity = list(msg.velocity[:n])
-            if msg.name:
-                self.joint_names = list(msg.name[:n])
+            self.feedback.update(msg)
 
     def get_progression(self):
         with self.buffer_lock:

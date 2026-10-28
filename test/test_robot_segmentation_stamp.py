@@ -285,10 +285,10 @@ FINGERS = ['panda_finger_joint1', 'panda_finger_joint2']  # locked at 0.04 in fr
 
 
 @pytest.fixture
-def franka(tmp_path):
+def franka(tmp_path, request):
     """Run the node on cuRobo's Franka, whose model locks the two finger joints."""
     descriptor = tmp_path / 'franka_test.yaml'
-    descriptor.write_text(FRANKA_DESCRIPTOR)
+    descriptor.write_text(FRANKA_DESCRIPTOR + getattr(request, 'param', ''))
     rclpy.init(args=['--ros-args', '-p', f'robot:={descriptor}'])
     node = DepthMapRobotSegmentation()
     yield node
@@ -355,6 +355,32 @@ def test_a_frame_without_the_measured_locked_joints_at_its_stamp_is_dropped(fran
 
     assert images == []
     assert any(f'No {FINGERS} positions at the depth stamp' in w for w in logged)
+
+
+# A driver publishing the fingers under its own names, in mm of opening.
+DRIVER_FINGERS = """joint_states:
+  names: {panda_finger_joint1: left_mm, panda_finger_joint2: right_mm}
+  conversions:
+    panda_finger_joint1: {reported: [0.0, 80.0], model: [0.0, 0.04]}
+    panda_finger_joint2: {reported: [0.0, 80.0], model: [0.0, 0.04]}
+"""
+
+
+@pytest.mark.parametrize('franka', [DRIVER_FINGERS], indirect=True)
+def test_locked_joints_are_read_through_the_descriptor_joint_states_map(franka, monkeypatch):
+    camera_info(franka)
+    camera_tf(franka, 0, 1.0, static=True)
+    names = list(franka._kin_model.joint_names) + ['left_mm', 'right_mm']
+    for t_ns in (STAMP_NS - 2 * MS, STAMP_NS + 2 * MS):
+        franka.listener_callback_joint_states(JointState(
+            header=Header(stamp=stamp(t_ns)), name=names, position=[0.0] * 7 + [40.0] * 2))
+    markers = capture(franka.sphere_marker_pub, monkeypatch)
+
+    franka.listener_callback_depth(depth())
+
+    assert len(markers) == 1
+    np.testing.assert_allclose(published_centres(markers[0]), franka_spheres([0.02] * 2)[:, :3],
+                               atol=1e-4)
 
 
 def test_destroy_node_stops_the_listener_threads():

@@ -260,12 +260,11 @@ class RobotContext:
             if self.robot_strategy is None:
                 return False
             # set_command()/send_trajectrory() each take-and-release buffer_lock
-            # internally — without also holding it HERE across both calls, the
-            # driver's callback_joint_pose (which only takes buffer_lock) could
-            # overwrite joint_names in the gap between them, and
-            # send_trajectrory() would then publish those names against THESE
-            # positions/velocities. buffer_lock is an RLock precisely so this
-            # nesting (outer hold + set_command()'s own internal acquire) works.
+            # internally — without also holding it HERE across both calls,
+            # another thread taking only buffer_lock (the emulator's playback,
+            # a driver callback) could run in the gap between them.
+            # buffer_lock is an RLock precisely so this nesting (outer hold +
+            # set_command()'s own internal acquire) works.
             with self.robot_strategy.buffer_lock:
                 self.robot_strategy.set_command(
                     joint_names, vel_command, accel_command, position_command)
@@ -276,6 +275,27 @@ class RobotContext:
         with self.strategy_lock:
             if self.robot_strategy is None:
                 return [0.0] * self.description.dof
+            return self.robot_strategy.get_joint_pose()
+
+    def get_fresh_joint_pose(self):
+        """
+        Return get_joint_pose(), refused when the driver's latest joint states are too old.
+
+        Too old: older than the descriptor's joint_states.max_age_s (0, the
+        default: no limit), or none received yet. A strategy without a driver
+        (the emulator) is never refused. Raises ValueError.
+        """
+        with self.strategy_lock:
+            if self.robot_strategy is None:
+                return [0.0] * self.description.dof
+            max_age_s = self.description.joint_state_map.max_age_s
+            age = self.robot_strategy.get_joint_state_age()
+            if max_age_s > 0 and age is not None and age > max_age_s:
+                topic = self.robot_strategy.params.get('joint_states_topic')
+                raise ValueError(
+                    f'no joint states on {topic} within joint_states.max_age_s '
+                    f'({max_age_s} s): the latest is '
+                    + ('missing' if age == float('inf') else f'{age:.3f} s old'))
             return self.robot_strategy.get_joint_pose()
 
     def get_joint_velocity(self):

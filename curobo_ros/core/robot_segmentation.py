@@ -116,6 +116,8 @@ class DepthMapRobotSegmentation(Node):
             raise ValueError(
                 f"Robot '{self.robot_context.description.name}': the descriptor has no "
                 'strategy_params.joint_states_topic, which segmentation needs')
+        # Driver names and values mapped to the model's (descriptor joint_states).
+        self._joint_state_map = self.robot_context.description.joint_state_map
         self._joint_history = JointStateHistory(kin_model.joint_names, joint_state_max_gap_s)
         # The joints the model locks (e.g. a gripper's fingers) keep their
         # configured values until the topic carries them; from then on each
@@ -273,6 +275,7 @@ class DepthMapRobotSegmentation(Node):
 
     def listener_callback_joint_states(self, msg):
         """Store a joint state; re-check a depth frame waiting for it (joint-state thread)."""
+        msg = self._joint_state_map.to_model(msg)
         # A state without the locked joints is not for them: no warning.
         if self._locked_history is not None and self._locked_history.add(msg) is None:
             self._locked_measured = True

@@ -35,6 +35,10 @@ reads it; its URDF paths are made absolute in the resolved copy.
 
 ``apply_curobo_patches: true`` opts the robot into the fixes in
 ``core/curobo_patches.py`` (off by default).
+
+An optional ``joint_states`` section says how the driver's joint states map to
+the model (driver joint names, per-joint value conversions, the oldest joint
+state a plan may start from); see ``robot/joint_state_map.py``.
 """
 
 import hashlib
@@ -46,6 +50,8 @@ import yaml as _yaml
 from ament_index_python.packages import (
     get_package_share_directory, PackageNotFoundError)
 from curobo.config_io import load_yaml
+
+from curobo_ros.robot.joint_state_map import JointStateMap
 
 _RESOLVED_DIR = '/tmp/curobo_ros_resolved'
 
@@ -214,6 +220,7 @@ class RobotDescription:
     strategy_key: str
     strategy_params: dict = field(default_factory=dict)
     apply_curobo_patches: bool = False   # opt-in, see core/curobo_patches.py
+    joint_state_map: JointStateMap = field(default_factory=JointStateMap)
     _joint_names: Optional[List[str]] = None
     _dof: Optional[int] = None
 
@@ -250,6 +257,10 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
     display_name = desc.get('display_name', name)
     strategy_key = desc.get('strategy', 'emulator')
     strategy_params = desc.get('strategy_params', {}) or {}
+    try:
+        joint_state_map = JointStateMap(desc.get('joint_states'))
+    except ValueError as ex:
+        raise ValueError(f'Descriptor {desc_path}: {ex}') from ex
 
     desc_dir = os.path.dirname(desc_path)
     curobo_uri = desc.get('curobo_config')
@@ -303,6 +314,7 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
         strategy_key=strategy_key,
         strategy_params=strategy_params,
         apply_curobo_patches=bool(desc.get('apply_curobo_patches', False)),
+        joint_state_map=joint_state_map,
         _joint_names=fallback_joints,
         _dof=len(fallback_joints) if fallback_joints else None,
     )
