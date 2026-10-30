@@ -11,6 +11,7 @@ from tf2_ros import TransformException
 
 import torch
 import numpy as np
+import math
 
 # How long a depth frame may wait for the TF at its stamp. Covers TF publishers
 # down to 20 Hz: the TF sample after the stamp then arrives at most 50 ms later.
@@ -341,14 +342,24 @@ class DepthMapCameraStrategy(CameraStrategy):
                     throttle_duration_sec=2.0)
                 return
             try:
-                depth_tensor = torch.from_numpy(depth_img_float).to(
-                    device=self.tensor_args.device, dtype=self.tensor_args.dtype)
-                depth_tensor = self._filter_depth(depth_tensor)
-
                 if isinstance(pose, Pose):
                     self.camera_pose = pose
                 else:
                     self.camera_pose = Pose.from_list(pose, device_cfg=self.tensor_args)
+
+                depth_tensor = torch.from_numpy(depth_img_float).to(
+                    device=self.tensor_args.device, dtype=self.tensor_args.dtype)
+                # The upstream segmentation topic has already removed the
+                # robot.  A separately owned generic object masker runs next,
+                # before FilterDepth can spread values into its holes.
+                object_masker = getattr(self.node, 'object_depth_masker', None)
+                if object_masker is not None:
+                    stamp_ns = (int(msg.header.stamp.sec) * 1_000_000_000
+                                + int(msg.header.stamp.nanosec))
+                    depth_tensor, _ = object_masker.apply(
+                        depth_tensor, self.intrinsics, self.camera_pose,
+                        stamp_ns=stamp_ns)
+                depth_tensor = self._filter_depth(depth_tensor)
 
                 # v2 Mapper requires a leading camera dimension on every field and a
                 # paired rgb image (zero buffer — no colour for collision mapping).
@@ -362,6 +373,11 @@ class DepthMapCameraStrategy(CameraStrategy):
                     depth_image=depth_b, rgb_image=rgb_b,
                     intrinsics=intrinsics_b, pose=self.camera_pose)
 
+                # Mapper applies its global time decay once per integration.
+                # Keep one timestamp on the shared mapper, rather than one per
+                # camera, so interleaved cameras decay by elapsed observation
+                # time instead of each applying a nominal-FPS multiplier.
+                self._set_temporal_decay(mapper, msg)
                 mapper.integrate(data_camera)
                 torch.cuda.synchronize()
                 self.depth_map = depth_tensor
@@ -373,3 +389,28 @@ class DepthMapCameraStrategy(CameraStrategy):
             self.node.get_logger().error(f"CvBridge error: {e}")
         except Exception as e:
             self.node.get_logger().error(f"Error processing depth image: {e}")
+
+    def _set_temporal_decay(self, mapper, msg):
+        """Set cuRobo's per-call global decay from accepted image stamps."""
+        if not self.node.has_parameter('decay_half_life_s'):
+            return
+        half_life = float(self.node.get_parameter('decay_half_life_s').value)
+        integrator = getattr(mapper, 'integrator', None)
+        config = getattr(integrator, 'config', None)
+        if config is None:
+            return
+        stamp = (int(msg.header.stamp.sec) * 1_000_000_000
+                 + int(msg.header.stamp.nanosec))
+        if half_life <= 0.0 or stamp <= 0:
+            config.time_decay = 1.0
+            return
+        previous = getattr(mapper, '_curobo_ros_last_integrated_stamp_ns', None)
+        if previous is None:
+            config.time_decay = 1.0
+            mapper._curobo_ros_last_integrated_stamp_ns = stamp
+            return
+        if stamp <= previous:
+            config.time_decay = 1.0
+            return
+        config.time_decay = math.exp2(-((stamp - previous) * 1e-9) / half_life)
+        mapper._curobo_ros_last_integrated_stamp_ns = stamp

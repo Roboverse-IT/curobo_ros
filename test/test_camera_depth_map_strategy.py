@@ -233,6 +233,25 @@ def test_depth_filter_matches_curobo_filter_depth(node):
     assert integrated[0, 0, 1] == 0.0
 
 
+@pytest.mark.parametrize('filter_options', [
+    {'flying_pixel_threshold': None, 'bilateral_kernel_size': None},
+    {'flying_pixel_threshold': 0.5, 'bilateral_kernel_size': None},
+    {'flying_pixel_threshold': 0.5, 'bilateral_kernel_size': 5},
+])
+def test_depth_filter_keeps_segmentation_holes_invalid(node, filter_options):
+    strategy = camera(
+        node, extrinsics=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        depth_filter={'enabled': True, 'depth_min': 0.15, 'depth_max': 2.0,
+                      **filter_options})
+    masked = np.full((16, 16), 0.8, dtype=np.float32)
+    masked[4:12, 4:12] = 0.0
+
+    strategy.callback_depth_map(depth_float(masked))
+
+    integrated = node.mapper.observations[-1].depth_image[0]
+    assert torch.count_nonzero(integrated[4:12, 4:12]) == 0
+
+
 def test_depth_filter_is_disabled_by_default(node):
     """Omitting the filter must preserve every source depth value."""
     strategy = camera(
@@ -243,6 +262,66 @@ def test_depth_filter_is_disabled_by_default(node):
 
     integrated = node.mapper.observations[-1].depth_image.cpu().numpy()[0]
     np.testing.assert_allclose(integrated, raw, equal_nan=True)
+
+
+def test_object_masker_runs_before_filter_and_uses_image_stamp(node):
+    """The mapper boundary accepts a generic post-robot object-mask stage."""
+    class Masker:
+        def __init__(self):
+            self.stamps = []
+
+        def apply(self, image, intrinsics, pose, stamp_ns):
+            self.stamps.append(stamp_ns)
+            out = image.clone()
+            out[0, 0] = 0.0
+            return out, torch.zeros_like(image, dtype=torch.bool)
+
+    node.object_depth_masker = Masker()
+    strategy = camera(
+        node, extrinsics=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        depth_filter={'enabled': True, 'depth_min': 0.15, 'depth_max': 2.0,
+                      'flying_pixel_threshold': None, 'bilateral_kernel_size': None})
+    strategy.callback_depth_map(depth_float(np.full((8, 8), 0.8, dtype=np.float32), sec=12))
+    assert node.object_depth_masker.stamps == [12_000_000_000]
+    assert node.mapper.observations[-1].depth_image[0, 0, 0] == 0.0
+
+
+def test_generic_object_masker_removes_only_matching_depth(node):
+    from curobo_ros.perception import ObjectDepthMasker, ObjectGeometry
+
+    node.object_depth_masker = ObjectDepthMasker(
+        depth_tolerance_m=0.01, dilation_px=0)
+    node.object_depth_masker.set_object(
+        'payload', ObjectGeometry.cuboid([0.001, 0.001, 0.02]),
+        pose=[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+    strategy = camera(
+        node, extrinsics=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+    strategy.callback_depth_map(depth_float(np.full((8, 8), 0.99, dtype=np.float32), sec=13))
+    integrated = node.mapper.observations[-1].depth_image[0]
+    assert 0 < torch.count_nonzero(integrated) < integrated.numel()
+
+
+def test_temporal_decay_uses_shared_accepted_image_time(node):
+    """Interleaved cameras share one elapsed-time decay clock on their mapper."""
+    node.declare_parameter('decay_half_life_s', 2.0)
+
+    class Config:
+        time_decay = None
+
+    class TimedMapper:
+        def __init__(self):
+            self.integrator = type('Integrator', (), {'config': Config()})()
+
+    node.mapper = TimedMapper()
+    first, second = camera(node), camera(node)
+    first._set_temporal_decay(node.mapper, depth(10))
+    assert node.mapper.integrator.config.time_decay == 1.0
+    second._set_temporal_decay(node.mapper, depth(11))
+    assert node.mapper.integrator.config.time_decay == pytest.approx(2 ** -0.5)
+    first._set_temporal_decay(node.mapper, depth(11))
+    assert node.mapper.integrator.config.time_decay == 1.0
+    second._set_temporal_decay(node.mapper, depth(15))
+    assert node.mapper.integrator.config.time_decay == pytest.approx(2 ** -2.0)
 
 
 @pytest.mark.parametrize('config, match', [

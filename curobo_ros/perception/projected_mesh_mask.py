@@ -220,6 +220,47 @@ if wp is not None:
                         wp.atomic_max(
                             output, y * width + x, face_link_ids[tid] + 1)
 
+    @wp.kernel
+    def _rasterize_projected_triangle_depth(
+        vertices: wp.array(dtype=wp.vec2),
+        camera_vertices: wp.array(dtype=wp.vec3),
+        faces: wp.array(dtype=wp.int32, ndim=2),
+        output: wp.array(dtype=float),
+        width: int,
+        height: int,
+    ):
+        """Rasterize triangles into a nearest camera-z buffer.
+
+        ``z`` is interpolated perspectively.  Linearly interpolating vertex
+        z in screen space is only correct for a fronto-parallel surface; the
+        reciprocal form below is the camera-z of the ray/triangle
+        intersection at this pixel.
+        """
+        tid = wp.tid()
+        ia, ib, ic = faces[tid, 0], faces[tid, 1], faces[tid, 2]
+        a, b, c = vertices[ia], vertices[ib], vertices[ic]
+        za, zb, zc = (camera_vertices[ia][2], camera_vertices[ib][2],
+                      camera_vertices[ic][2])
+        xmin = wp.max(int(wp.floor(wp.min(a[0], wp.min(b[0], c[0])))), 0)
+        xmax = wp.min(int(wp.ceil(wp.max(a[0], wp.max(b[0], c[0])))), width - 1)
+        ymin = wp.max(int(wp.floor(wp.min(a[1], wp.min(b[1], c[1])))), 0)
+        ymax = wp.min(int(wp.ceil(wp.max(a[1], wp.max(b[1], c[1])))), height - 1)
+        denominator = ((b[1] - c[1]) * (a[0] - c[0])
+                       + (c[0] - b[0]) * (a[1] - c[1]))
+        if wp.abs(denominator) > 1.0e-8:
+            for y in range(ymin, ymax + 1):
+                for x in range(xmin, xmax + 1):
+                    wa = ((b[1] - c[1]) * (float(x) - c[0])
+                          + (c[0] - b[0]) * (float(y) - c[1])) / denominator
+                    wb = ((c[1] - a[1]) * (float(x) - c[0])
+                          + (a[0] - c[0]) * (float(y) - c[1])) / denominator
+                    wc = 1.0 - wa - wb
+                    if wa >= -1.0e-6 and wb >= -1.0e-6 and wc >= -1.0e-6:
+                        inverse_depth = wa / za + wb / zb + wc / zc
+                        if inverse_depth > 0.0:
+                            wp.atomic_min(output, y * width + x,
+                                          1.0 / inverse_depth)
+
 
 def _quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
     """Return row-major rotation matrices for cuRobo wxyz quaternions."""
@@ -235,6 +276,55 @@ def _quaternion_to_rotation_matrix(quaternion: torch.Tensor) -> torch.Tensor:
         2.0 * (qy * qz + qw * qx),
         1.0 - 2.0 * (qx * qx + qy * qy),
     ), dim=-1).reshape(-1, 3, 3)
+
+
+def rasterize_nearest_depth(camera_vertices, faces, intrinsics, image_shape):
+    """Return a CUDA nearest-surface camera-z image for arbitrary triangles.
+
+    ``camera_vertices`` is ``(N, 3)`` in the optical frame, and ``faces`` is
+    ``(M, 3)``.  The function deliberately has no robot/link concepts so it
+    can serve object masking and other depth-aware projection users.  Invalid
+    and camera-plane-crossing faces are omitted rather than extrapolated.
+    """
+    if wp is None:
+        raise RuntimeError('nearest-depth rasterization requires Warp')
+    if camera_vertices.ndim != 2 or camera_vertices.shape[1] != 3:
+        raise ValueError('camera_vertices must have shape (N, 3)')
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError('faces must have shape (M, 3)')
+    if camera_vertices.device.type != 'cuda' or faces.device != camera_vertices.device:
+        raise ValueError('vertices and faces must be on the same CUDA device')
+    height, width = map(int, image_shape)
+    if height <= 0 or width <= 0:
+        raise ValueError('image_shape must contain positive height and width')
+    init_warp()
+    vertices = camera_vertices.to(dtype=torch.float32).contiguous()
+    faces64 = faces.to(device=vertices.device, dtype=torch.int64).contiguous()
+    if faces64.numel() and (int(faces64.min()) < 0 or int(faces64.max()) >= len(vertices)):
+        raise ValueError('face index is outside camera_vertices')
+    valid_vertices = torch.isfinite(vertices).all(dim=1) & (vertices[:, 2] > 1.0e-5)
+    valid_faces = faces64[valid_vertices[faces64].all(dim=1)]
+    front = torch.full((height, width), float('inf'), dtype=torch.float32,
+                       device=vertices.device)
+    if not len(valid_faces):
+        return front
+    fx, fy, cx, cy = (float(value) for value in intrinsics)
+    projected = torch.empty((len(vertices), 2), dtype=torch.float32,
+                            device=vertices.device)
+    projected[:, 0] = fx * vertices[:, 0] / vertices[:, 2] + cx
+    projected[:, 1] = fy * vertices[:, 1] / vertices[:, 2] + cy
+    stream = wp.stream_from_torch(torch.cuda.current_stream(device=vertices.device))
+    wp.launch(
+        _rasterize_projected_triangle_depth,
+        dim=int(valid_faces.shape[0]),
+        inputs=[
+            wp.from_torch(projected, dtype=wp.vec2),
+            wp.from_torch(vertices, dtype=wp.vec3),
+            wp.from_torch(valid_faces.to(dtype=torch.int32).contiguous()),
+            wp.from_torch(front.reshape(-1)), width, height,
+        ],
+        device=wp.device_from_torch(vertices.device), stream=stream)
+    return front
 
 
 class ProjectedMeshMask:

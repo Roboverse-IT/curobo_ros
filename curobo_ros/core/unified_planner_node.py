@@ -22,6 +22,7 @@ import time
 import traceback
 
 import rclpy
+import rclpy.time
 import torch
 from rclpy.action import ActionServer
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
@@ -37,6 +38,8 @@ from curobo_msgs.action import GraspPlan, SendTrajectory
 from curobo.types import DeviceCfg, JointState
 
 from curobo_ros.robot.locked_joints import LockedJoints
+from curobo_ros.robot.joint_state_history import (
+    DEFAULT_JOINT_STATE_MAX_GAP_S, JointStateHistory)
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.core.config_wrapper_motion import ConfigWrapperMotion
 from curobo_ros.core.attachment_services import AttachmentServices
@@ -50,6 +53,7 @@ from curobo_ros.planners import (
     ReactiveController,
     SinglePlanner,
 )
+from curobo_ros.perception import ObjectDepthMasker
 
 
 class UnifiedPlannerNode(Node):
@@ -219,6 +223,37 @@ class UnifiedPlannerNode(Node):
             'joint_names', list(kin.joint_names), ParameterDescriptor(read_only=True))
         self.declare_parameter(
             'tool_frames', list(kin.tool_frames), ParameterDescriptor(read_only=True))
+
+        # Mapper-aware attachment masking is deliberately opt-in.  The history
+        # owns no second robot model: it stores named feedback only, and FK uses
+        # this node's already-loaded planner kinematics at each image stamp.
+        self.declare_parameter('attached_object_masking_enabled', False)
+        self.declare_parameter('attached_object_mask_depth_tolerance_m', 0.015)
+        self.declare_parameter('attached_object_mask_dilation_px', 1)
+        self.declare_parameter(
+            'attached_object_mask_joint_state_max_gap_s',
+            DEFAULT_JOINT_STATE_MAX_GAP_S)
+        self.object_depth_masker = None
+        self._attachment_joint_history = None
+        if self.get_parameter('attached_object_masking_enabled').value:
+            tolerance = float(self.get_parameter(
+                'attached_object_mask_depth_tolerance_m').value)
+            dilation = int(self.get_parameter(
+                'attached_object_mask_dilation_px').value)
+            max_gap = float(self.get_parameter(
+                'attached_object_mask_joint_state_max_gap_s').value)
+            self.object_depth_masker = ObjectDepthMasker(tolerance, dilation)
+            self._attachment_joint_history = JointStateHistory(
+                kin.joint_names, max_gap_s=max_gap)
+            joint_topic = self.robot_context.description.strategy_params.get(
+                'joint_states_topic')
+            if not joint_topic:
+                raise ValueError(
+                    'attached_object_masking_enabled requires '
+                    'strategy_params.joint_states_topic')
+            self._attachment_joint_subscription = self.create_subscription(
+                JointStateMsg, joint_topic, self._attachment_joint_state_callback,
+                100, callback_group=ReentrantCallbackGroup())
 
         # Shared Scene for all planners — references ObstacleManager's Scene.
         # All planners see the same obstacles after update_world(scene).
@@ -492,6 +527,39 @@ class UnifiedPlannerNode(Node):
         """The scene collision checker of every solver that exists."""
         return [(label, s.scene_collision_checker) for label, s in self._solvers()
                 if getattr(s, 'scene_collision_checker', None) is not None]
+
+    def _attachment_joint_state_callback(self, msg):
+        """Store mapped feedback for the mapper attachment pose at image time."""
+        if self._attachment_joint_history is None:
+            return
+        mapped = self.robot_context.description.joint_state_map.to_model(msg)
+        reason = self._attachment_joint_history.add(mapped)
+        if reason is not None:
+            self.get_logger().warn(
+                f'attached-object pose feedback ignored: {reason}',
+                throttle_duration_sec=5.0)
+
+    def get_attachment_link_pose_at_stamp(self, link, stamp_ns):
+        """Return base<-link at an image stamp, or ``None`` when unavailable.
+
+        This is intentionally a non-blocking lookup for the depth callback.
+        The ObjectDepthMasker then leaves this object's pixels untouched rather
+        than applying a newest-state pose to an older image.
+        """
+        history = self._attachment_joint_history
+        if history is None:
+            return None
+        positions, _ = history.at(rclpy.time.Time(nanoseconds=int(stamp_ns)))
+        if positions is None:
+            return None
+        kin = self.config_wrapper_motion.kin_model
+        q = torch.as_tensor(positions, dtype=torch.float32, device=self.tensor_args.device).reshape(1, -1)
+        try:
+            rotation, translation = AttachmentServices._link_pose(kin, q, link)
+        except (KeyError, ValueError):
+            return None
+        quaternion = AttachmentServices._rot_to_quat(rotation)
+        return translation.detach().cpu().tolist() + quaternion
 
     def _obstacles_off(self):
         """The obstacles every solver must see switched off: the ones switched

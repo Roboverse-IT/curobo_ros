@@ -2,6 +2,7 @@
 
 from curobo.types import CameraObservation, DeviceCfg, Pose
 from curobo_ros.core.obstacle_manager import ObstacleManager
+from curobo_ros.perception import ObjectDepthMasker, ObjectGeometry
 import numpy as np
 import pytest
 import rclpy
@@ -104,3 +105,103 @@ def test_removed_parameters_are_reported(make_node):
     assert "'mapper_image_height'" in logger.warnings[1]
     assert "'mapper_image_width'" in logger.warnings[2]
     assert not node.has_parameter('mapper_image_width')
+
+
+def test_frustum_decay_is_forwarded_to_the_native_mapper(make_node):
+    node, _ = make_node([Parameter('frustum_decay_factor', value=0.95)])
+    manager = ObstacleManager(node, None)
+    manager.setup_perception(num_cameras=1, total_frame_rate_hz=30.0)
+
+    assert manager.mapper.config.frustum_decay_factor == pytest.approx(0.95)
+
+
+def test_tsdf_invalidation_rejects_bad_bounds_and_handles_empty_map(make_node):
+    node, _ = make_node()
+    manager = ObstacleManager(node, None)
+    manager.setup_perception(num_cameras=1, total_frame_rate_hz=30.0)
+
+    with pytest.raises(ValueError, match='invalidation bounds'):
+        manager.invalidate_tsdf_region([1, 0, 0], [0, 1, 1])
+    assert manager.invalidate_tsdf_region([0, 0, 0], [1, 1, 1]) == 0
+
+
+def test_tsdf_invalidation_clears_only_selected_sparse_voxels(make_node):
+    node, _ = make_node()
+    manager = ObstacleManager(node, None)
+    manager.setup_perception(num_cameras=1, total_frame_rate_hz=30.0)
+    node.mapper.integrate(observation(64, 64))
+    torch.cuda.synchronize()
+    data = node.mapper.tsdf.data
+    before = data.block_data.clone()
+    n = int(data.num_allocated.item())
+    active = torch.nonzero(data.block_to_hash_slot[:n] >= 0).reshape(-1)
+    assert len(active) > 0
+    pool_idx = int(active[0].item())
+    coords = data.block_coords[:n * 3].view(n, 3)
+    # Clear a single voxel at the centre of an allocated sparse block.
+    block = coords[pool_idx].float()
+    size = float(data.voxel_size)
+    origin = data.origin.float()
+    if data.grid_shape is None:
+        point = origin + (block * 8.0 + 0.5) * size
+    else:
+        shape = torch.tensor(
+            (data.grid_shape[2], data.grid_shape[1], data.grid_shape[0]),
+            device=block.device, dtype=torch.float32)
+        point = origin + (block * 8.0 + 0.5 - shape / 2.0) * size
+    cleared = manager.invalidate_tsdf_region((point - size * 0.1).cpu(),
+                                              (point + size * 0.1).cpu())
+    assert cleared == 1
+    assert torch.count_nonzero(data.block_data[pool_idx, 1:] != before[pool_idx, 1:]) == 0
+    unchanged = torch.arange(n, device='cuda') != pool_idx
+    assert torch.count_nonzero(data.block_data[:n][unchanged] != before[:n][unchanged]) == 0
+    assert float(data.block_sums[pool_idx].item()) == pytest.approx(
+        float(data.block_data[pool_idx, :, 1].sum(dtype=torch.float32).item()))
+    assert node.mapper._last_voxel_grid is None
+
+
+def test_masked_object_is_not_reintegrated_after_local_invalidation(make_node):
+    """The generic mask + existing invalidator remove a payload without erasing
+    the mapper globally; an all-masked follow-up cannot recreate it."""
+    node, _ = make_node()
+    manager = ObstacleManager(node, None)
+    manager.setup_perception(num_cameras=1, total_frame_rate_hz=30.0)
+    raw = observation(64, 64)
+    # The camera is 1 m above base looking down.  This broad cuboid's top face
+    # is at camera-z 0.775 m and fills this small field of view.
+    raw.depth_image.fill_(0.775)
+    masker = ObjectDepthMasker(depth_tolerance_m=0.01, dilation_px=0)
+    masker.set_object('payload', ObjectGeometry.cuboid([0.2, 0.2, 0.05]),
+                      pose=[0.0, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0])
+    masked, mask = masker.apply(raw.depth_image[0], raw.intrinsics[0], raw.pose)
+    assert bool(mask.all())
+
+    node.mapper.integrate(raw)
+    torch.cuda.synchronize()
+    assert node.mapper.get_stats()['active_blocks'] > 0
+    cleared = manager.invalidate_tsdf_region([-0.11, -0.11, 0.14],
+                                              [0.11, 0.11, 0.26])
+    assert cleared > 0
+    data = node.mapper.tsdf.data
+    n = int(data.num_allocated.item())
+    active = data.block_to_hash_slot[:n] >= 0
+    pool = torch.arange(n, device='cuda')[active]
+    blocks = data.block_coords[:n * 3].view(n, 3)[active].to(torch.int64)
+    local = torch.arange(512, device='cuda', dtype=torch.int64)
+    xyz = torch.stack((local % 8, (local // 8) % 8, local // 64), dim=1)
+    voxels = blocks[:, None, :] * 8 + xyz[None, :, :]
+    shape = torch.as_tensor(
+        (data.grid_shape[2], data.grid_shape[1], data.grid_shape[0]), device='cuda')
+    centers = data.origin.float()[None, None, :] + (
+        voxels.float() + 0.5 - shape / 2.0) * float(data.voxel_size)
+    region = ((centers >= torch.tensor([-0.11, -0.11, 0.14], device='cuda'))
+              & (centers <= torch.tensor([0.11, 0.11, 0.26], device='cuda'))).all(dim=-1)
+    assert int(region.sum()) == cleared
+    assert torch.count_nonzero(data.block_data[pool][region]) == 0
+
+    raw.depth_image = masked.unsqueeze(0)
+    node.mapper.integrate(raw)
+    torch.cuda.synchronize()
+    # Mapper bookkeeping/decay can change unrelated blocks, but a zero-depth
+    # image must not put any TSDF value back into the invalidated payload area.
+    assert torch.count_nonzero(data.block_data[pool][region]) == 0

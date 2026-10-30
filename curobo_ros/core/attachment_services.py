@@ -27,6 +27,7 @@ spheres: see the node's apply_robot_sphere_states / apply_obstacle_states.
 """
 
 
+import numpy as np
 import torch
 from std_srvs.srv import Trigger
 from curobo.scene import Capsule, Cuboid, Cylinder, Mesh, Sphere
@@ -35,6 +36,7 @@ from curobo.sphere_fit import SphereFitType, estimate_sphere_count
 
 from curobo_msgs.srv import AttachObject, RemoveObject
 from curobo_ros.robot.robot_description import resolve_request_file
+from curobo_ros.perception import ObjectGeometry
 
 ATTACH_LINK = "attached_object"
 
@@ -54,6 +56,9 @@ class AttachmentServices:
         self.node = node
         self.config_wrapper = config_wrapper
         self._attached = {}  # attach link -> name of the obstacle attached to it
+        # link -> {name, geometry, object_in_link, last_pose}. Present only
+        # when the explicit mapper-masking feature is enabled on the node.
+        self._mapper_attachments = {}
 
         name = node.get_name()
         self.attach_object_srv = node.create_service(
@@ -158,6 +163,13 @@ class AttachmentServices:
                         or self._find_obstacle(scene, object_name))
             if obstacle is None:
                 raise ValueError(f"Obstacle '{object_name}' not found in the scene")
+        if link in self._attached:
+            raise ValueError(
+                f"attach link '{link}' already holds '{self._attached[link]}'")
+        # Validate object geometry and establish the object<-link transform
+        # before changing collision state. This makes an explicitly enabled
+        # mapper mask fail atomically for unsupported geometry.
+        prepared = self._prepare_mapper_attachment(obstacle, grasp_end_state, link)
         with self.node.gpu_lock:
             am = self._attachment_manager()
             # cuRobo's automatic fit (num_spheres=None) sizes itself to the
@@ -195,6 +207,17 @@ class AttachmentServices:
             self.config_wrapper.kin_model.kinematics_config.update_link_spheres(
                 link, am.kinematics_params.get_link_spheres(link))
             self._attached[link] = object_name
+            try:
+                self._register_mapper_attachment(link, object_name, prepared)
+            except Exception:
+                # Registration follows only validated inputs, but mapper/ESDF
+                # operations can still fail. Roll collision state back rather
+                # than returning success with an unmasked attached payload.
+                self._attachment_manager().detach(link)
+                self.config_wrapper.kin_model.kinematics_config.reset_link_spheres(link)
+                self._attached.pop(link, None)
+                self._apply_to_solvers(object_name)
+                raise
             self._apply_to_solvers(object_name)
         self.node.get_logger().info(
             f"Attached '{object_name}' to link '{link}'")
@@ -247,6 +270,118 @@ class AttachmentServices:
                 checker.enable_obstacle(name, enabled)
             except Exception as e:
                 self.node.get_logger().error(f"obstacle '{name}' in {label}: {e}")
+
+    @staticmethod
+    def _pose_matrix(pose):
+        value = np.asarray(pose, dtype=np.float64).reshape(7)
+        q = value[3:] / np.linalg.norm(value[3:])
+        w, x, y, z = q
+        matrix = np.eye(4)
+        matrix[:3, :3] = [[1 - 2 * (y*y + z*z), 2 * (x*y - z*w), 2 * (x*z + y*w)],
+                          [2 * (x*y + z*w), 1 - 2 * (x*x + z*z), 2 * (y*z - x*w)],
+                          [2 * (x*z - y*w), 2 * (y*z + x*w), 1 - 2 * (x*x + y*y)]]
+        matrix[:3, 3] = value[:3]
+        return matrix
+
+    @staticmethod
+    def _matrix_pose(matrix):
+        rotation = matrix[:3, :3]
+        trace = np.trace(rotation)
+        if trace > 0:
+            s = 2.0 * np.sqrt(trace + 1.0)
+            q = [0.25*s, (rotation[2, 1]-rotation[1, 2])/s,
+                 (rotation[0, 2]-rotation[2, 0])/s,
+                 (rotation[1, 0]-rotation[0, 1])/s]
+        else:
+            i = int(np.argmax(np.diag(rotation)))
+            j, k = (i + 1) % 3, (i + 2) % 3
+            s = 2.0 * np.sqrt(max(1.0 + rotation[i, i] - rotation[j, j] - rotation[k, k], 1e-15))
+            q = [(rotation[k, j]-rotation[j, k])/s, 0.0, 0.0, 0.0]
+            q[i + 1] = 0.25*s
+            q[j + 1] = (rotation[i, j]+rotation[j, i])/s
+            q[k + 1] = (rotation[i, k]+rotation[k, i])/s
+        q = np.asarray(q) / np.linalg.norm(q)
+        return np.r_[matrix[:3, 3], q].tolist()
+
+    @staticmethod
+    def _mask_geometry(obstacle):
+        """Convert only geometry with exact supported masking semantics."""
+        if isinstance(obstacle, Cuboid):
+            return ObjectGeometry.cuboid(obstacle.dims)
+        if isinstance(obstacle, Mesh):
+            vertices = getattr(obstacle, 'vertices', None)
+            faces = getattr(obstacle, 'faces', None)
+            if vertices is None or faces is None:
+                geometry = ObjectGeometry.mesh_file(obstacle.file_path)
+            else:
+                geometry = ObjectGeometry.mesh(vertices, faces)
+            scale = np.asarray(getattr(obstacle, 'scale', [1, 1, 1]), dtype=np.float32)
+            if scale.shape != (3,) or np.any(scale <= 0):
+                raise ValueError(f"mesh '{obstacle.name}' has invalid scale {scale!r}")
+            return ObjectGeometry.mesh(geometry.vertices * scale, geometry.faces)
+        raise ValueError(
+            f"attached-object depth masking supports cuboid and mesh geometry, "
+            f"not {type(obstacle).__name__}")
+
+    def _mapper_mask_enabled(self):
+        return getattr(self.node, 'object_depth_masker', None) is not None
+
+    def _prepare_mapper_attachment(self, obstacle, state, link):
+        """Validate all mapper prerequisites before collision state mutates."""
+        if not self._mapper_mask_enabled():
+            return None
+        if not hasattr(self.node, 'get_attachment_link_pose_at_stamp'):
+            raise RuntimeError('attached-object masking needs timestamped link-pose support')
+        geometry = self._mask_geometry(obstacle)
+        object_pose = list(obstacle.pose)
+        kin = self._attachment_manager()._kinematics
+        q = state.position.reshape(1, -1)[:, : kin.get_dof()]
+        rotation, translation = self._link_pose(kin, q, link)
+        link_pose = translation.detach().cpu().tolist() + self._rot_to_quat(rotation)
+        return geometry, object_pose, np.linalg.inv(self._pose_matrix(link_pose)) @ self._pose_matrix(object_pose)
+
+    def _register_mapper_attachment(self, link, name, prepared):
+        if prepared is None:
+            return
+        geometry, object_pose, object_in_link = prepared
+        record = {'name': name, 'geometry': geometry,
+                  'object_in_link': object_in_link, 'last_pose': object_pose}
+        self._mapper_attachments[link] = record
+
+        def pose_at_stamp(stamp_ns, attach_link=link):
+            current = self._mapper_attachments.get(attach_link)
+            if current is None:
+                return None
+            link_pose = self.node.get_attachment_link_pose_at_stamp(attach_link, stamp_ns)
+            if link_pose is None:
+                return None
+            pose = self._matrix_pose(self._pose_matrix(link_pose) @ current['object_in_link'])
+            current['last_pose'] = pose
+            return pose
+
+        self.node.object_depth_masker.set_object(name, geometry, pose_at_stamp=pose_at_stamp)
+        manager = self.config_wrapper.obstacle_manager
+        config = getattr(getattr(manager, 'mapper', None), 'config', None)
+        margin = float(getattr(config, 'truncation_distance', 0.0))
+        lower, upper = geometry.world_aabb(object_pose, margin)
+        manager.invalidate_tsdf_region(lower, upper)
+        if manager.refresh_esdf() and hasattr(self.node, 'update_all_solvers_world'):
+            self.node.update_all_solvers_world(manager.get_scene())
+
+    def _unregister_mapper_attachment(self, link, release_pose=None):
+        record = self._mapper_attachments.pop(link, None)
+        if record is None:
+            return False
+        self.node.object_depth_masker.remove_object(record['name'])
+        manager = self.config_wrapper.obstacle_manager
+        pose = release_pose if release_pose is not None else record['last_pose']
+        config = getattr(getattr(manager, 'mapper', None), 'config', None)
+        margin = float(getattr(config, 'truncation_distance', 0.0))
+        lower, upper = record['geometry'].world_aabb(pose, margin)
+        manager.invalidate_tsdf_region(lower, upper)
+        if manager.refresh_esdf() and hasattr(self.node, 'update_all_solvers_world'):
+            self.node.update_all_solvers_world(manager.get_scene())
+        return True
 
     def payload(self, request, joint_state):
         """The geometry an AttachObject request describes (object_name empty),
@@ -353,14 +488,26 @@ class AttachmentServices:
             return scene.get_obstacle(name)
         return None
 
-    def detach(self, link: str = ATTACH_LINK) -> str:
-        """Release the attached object (reset link spheres, re-enable the obstacle)."""
+    def detach(self, link: str = ATTACH_LINK, release_pose=None) -> str:
+        """Release an object, retiring an unknown-position mapper world copy.
+
+        ``release_pose`` is optional base-frame [x,y,z,qw,qx,qy,qz]. The
+        existing ROS detach service has no measured release pose, so a
+        mapper-aware attachment intentionally leaves its old explicit world
+        obstacle disabled rather than restoring it at the pre-grasp pose.
+        """
         with self.node.gpu_lock:
             self._attachment_manager().detach(link)
             self.config_wrapper.kin_model.kinematics_config.reset_link_spheres(link)
             released = self._attached.pop(link, None)
             obstacle_names = self.config_wrapper.obstacle_manager.obstacle_names
-            if (released and not released.startswith("payload@")
+            mapper_managed = self._unregister_mapper_attachment(link, release_pose)
+            if mapper_managed and released and not released.startswith("payload@"):
+                # The released pose is unknown to this service; maintaining the
+                # old explicit obstacle would create a stale collision world.
+                self.config_wrapper.obstacle_manager.set_obstacles_enabled(
+                    [released], False)
+            elif (released and not released.startswith("payload@")
                     and released not in obstacle_names):
                 self._set_world_copy(released, True)
             self._apply_to_solvers(released)

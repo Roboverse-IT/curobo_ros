@@ -49,7 +49,7 @@ def test_outputs_carry_the_depth_header(node, monkeypatch):
     assert node.set_mask_callback(mask, SetMask.Response()).success
 
     images = capture(node.publisher_, monkeypatch)
-    markers = capture(node.sphere_marker_pub, monkeypatch)
+    markers = capture(node.sphere_marker_pub, monkeypatch, subscribed=True)
     clouds = capture(node.robot_pointcloud_pub, monkeypatch, subscribed=True)
 
     # The joints around the depth stamp, as the robot driver publishes them.

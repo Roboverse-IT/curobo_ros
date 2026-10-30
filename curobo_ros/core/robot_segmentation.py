@@ -645,10 +645,8 @@ class DepthMapRobotSegmentation(Node):
         """
         Masks the depth image by removing robot points.
 
-        Strategy:
-        1. Convert depth image to point cloud
-        2. Apply robot masking on point cloud (reusing existing logic)
-        3. Convert masked point cloud back to depth image
+        Compute a mask at the input pixel positions. Unmasked depths retain
+        their original values and positions without a 3D reprojection.
 
         Args:
             depth_image: torch.Tensor of shape (H, W)
@@ -671,48 +669,39 @@ class DepthMapRobotSegmentation(Node):
         js = JointState(position=q_batched, joint_names=self._kin_model.joint_names)
         kinematics_state = self._kin_model.compute_kinematics(js)
         robot_spheres = kinematics_state.robot_spheres.reshape(-1, 4)
-        self.publish_collision_spheres(robot_spheres)
-
-        # Step 1: Convert depth image to point cloud.
-        points, valid_mask = self.depth_to_pointcloud(depth_image, camera_intrinsics)
-
-        # Step 2: Apply the sphere backend and the independent analytic object
-        # masks. Mesh-only mode preserves the input pixels when no object masks
-        # are configured instead of doing a needless point-cloud round trip.
-        use_spheres = self._segmentation_mode in ('sphere', 'combined')
-        if use_spheres or self._masks:
-            filtered_points, point_keep, points_base = self._mask_pointcloud(
-                points, kinematics_state, include_spheres=use_spheres)
-            masked_depth = self.pointcloud_to_depth(
-                filtered_points,
-                camera_intrinsics,
-                depth_image.shape)
-        else:
-            points_base = self._transform_points_to_base(points)
-            point_keep = torch.ones(
-                points.shape[0], dtype=torch.bool, device=self._device)
-            masked_depth = depth_image.clone()
+        if self.sphere_marker_pub.get_subscription_count() > 0:
+            self.publish_collision_spheres(robot_spheres)
 
         full_mask = torch.zeros_like(depth_image, dtype=torch.bool)
-        full_mask[valid_mask] = ~point_keep
+        points = valid_mask = None
+        use_spheres = self._segmentation_mode in ('sphere', 'combined')
+        if use_spheres or self._masks:
+            points, valid_mask = self.depth_to_pointcloud(
+                depth_image, camera_intrinsics)
+            point_keep = self._mask_pointcloud(
+                points, kinematics_state, include_spheres=use_spheres)
+            full_mask[valid_mask] = ~point_keep
 
-        # Step 3: Project the configured link hulls and union their silhouette
-        # with the sphere/object result.
+        # Union the projected link silhouettes with the 3D sphere/object mask.
         if self._mesh_segmenter is not None:
             mesh_mask = self._mesh_mask_from_state(
                 depth_image, camera_intrinsics, kinematics_state)
-            masked_depth.masked_fill_(mesh_mask, 0.0)
             full_mask.logical_or_(mesh_mask)
 
         if self.robot_pointcloud_pub.get_subscription_count() > 0:
-            masked_points = points_base[full_mask[valid_mask]]
-            if masked_points.shape[0] > 0:
+            if points is None:
+                points, valid_mask = self.depth_to_pointcloud(
+                    depth_image, camera_intrinsics)
+            masked_camera_points = points[full_mask[valid_mask]]
+            if masked_camera_points.shape[0] > 0:
+                masked_points = self._transform_points_to_base(
+                    masked_camera_points)
                 robot_frame = self.get_parameter(
                     'robot_base_frame').get_parameter_value().string_value
                 self.robot_pointcloud_pub.publish(self._create_pointcloud2_msg(
                     masked_points, robot_frame, self.depth_header.stamp))
 
-        return masked_depth
+        return depth_image.masked_fill(full_mask, 0.0)
 
     def _mesh_mask_from_state(self, depth_image, camera_intrinsics,
                               kinematics_state):
@@ -752,15 +741,13 @@ class DepthMapRobotSegmentation(Node):
             include_spheres: whether collision spheres contribute to the mask
 
         Returns:
-            Tuple of filtered camera points, keep mask, and base-frame points
+            Boolean keep mask in the original valid-pixel order
         """
         # v2: `robot_spheres` replaces `link_spheres_tensor`, shape [B, H, N, 4]
         robot_spheres = kinematics_state.robot_spheres.reshape(-1, 4)
 
         # The point cloud is in the camera optical frame, but robot_spheres are
-        # in the robot base frame. Transform the points into the base frame for
-        # the distance test; keep the original camera-frame cloud so the depth
-        # is reconstructed in the camera frame downstream.
+        # in the robot base frame. Transform points only for the distance test.
         points_base = self._transform_points_to_base(point_cloud)
 
         if include_spheres:
@@ -782,7 +769,7 @@ class DepthMapRobotSegmentation(Node):
         if inside_shapes is not None:
             mask = mask & ~inside_shapes
 
-        return point_cloud[mask], mask, points_base
+        return mask
 
     def _transform_points_to_base(self, points: torch.Tensor):
         """Transform camera-frame points (N, 3) into the robot base frame via TF.
@@ -908,7 +895,9 @@ class DepthMapRobotSegmentation(Node):
         """
         # Convert to numpy and scale back to millimeters for 16UC1 encoding
         depth_np = depth_tensor.cpu().numpy()
-        depth_mm = (depth_np * 1000.0).astype(np.uint16)
+        # Float32 metres decoded from integer millimetres can multiply back
+        # to 501.99997, etc. Truncation would lower surviving depth by 1 mm.
+        depth_mm = np.rint(depth_np * 1000.0).astype(np.uint16)
 
         # Create Image message
         msg = self.bridge.cv2_to_imgmsg(depth_mm, encoding="16UC1")

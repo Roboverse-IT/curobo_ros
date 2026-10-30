@@ -136,6 +136,9 @@ class ObstacleManager:
         # when cameras are added/removed or their frame rate changes — see
         # _resolve_time_decay. <= 0 disables the decay entirely.
         self._decay_half_life_s = self._declare_param('decay_half_life_s', 0.7)
+        self._frustum_decay_factor = float(self._declare_param('frustum_decay_factor', 1.0))
+        if not 0.0 < self._frustum_decay_factor <= 1.0:
+            raise ValueError('frustum_decay_factor must be in (0, 1]')
         self._warn_removed_params()
 
     # Removed parameters and what replaced them.
@@ -295,6 +298,7 @@ class ObstacleManager:
             # camera or changing an fps would otherwise silently shift the
             # forgetting horizon.
             decay_factor=time_decay,
+            frustum_decay_factor=self._frustum_decay_factor,
             num_cameras=1,
         ))
         self.node.mapper = self.mapper
@@ -334,6 +338,54 @@ class ObstacleManager:
         self.scene.voxel = [vg]
         self._esdf_voxel_name = vg.name
         return True
+
+    def invalidate_tsdf_region(self, bounds_min, bounds_max) -> int:
+        """Invalidate dynamic TSDF voxels in a base-frame axis-aligned box.
+
+        cuRobo v0.8 exposes no public region-clear API.  Keep the required
+        sparse-storage operation in this adapter so object lifecycle code does
+        not manipulate mapper internals.  The caller must subsequently call
+        :meth:`refresh_esdf` and propagate the resulting Scene to solvers.
+        """
+        if self.mapper is None:
+            return 0
+        lower = np.asarray(bounds_min, dtype=np.float32).reshape(3)
+        upper = np.asarray(bounds_max, dtype=np.float32).reshape(3)
+        if (not np.isfinite(lower).all() or not np.isfinite(upper).all()
+                or np.any(lower > upper)):
+            raise ValueError(f'invalid TSDF invalidation bounds: {bounds_min!r}, {bounds_max!r}')
+        data = self.mapper.tsdf.data
+        n_allocated = int(data.num_allocated.item())
+        if n_allocated <= 0:
+            return 0
+        active = data.block_to_hash_slot[:n_allocated] >= 0
+        if not bool(active.any()):
+            return 0
+        pool = torch.arange(n_allocated, device=data.block_coords.device)[active]
+        coords = data.block_coords[:n_allocated * 3].view(n_allocated, 3)[active].to(torch.int64)
+        local = torch.arange(512, device=coords.device, dtype=torch.int64)
+        xyz = torch.stack((local % 8, (local // 8) % 8, local // 64), dim=1)
+        voxels = coords[:, None, :] * 8 + xyz[None, :, :]
+        if data.grid_shape is None:
+            centers = data.origin.float()[None, None, :] + voxels.float() * float(data.voxel_size)
+        else:
+            shape = torch.as_tensor((data.grid_shape[2], data.grid_shape[1], data.grid_shape[0]),
+                                    device=coords.device, dtype=torch.float32)
+            centers = data.origin.float()[None, None, :] + (voxels.float() + 0.5 - shape / 2.0) * float(data.voxel_size)
+        region = ((centers >= torch.as_tensor(lower, device=coords.device))
+                  & (centers <= torch.as_tensor(upper, device=coords.device))).all(dim=-1)
+        cleared = int(region.sum().item())
+        if not cleared:
+            return 0
+        selected = data.block_data[pool]
+        selected[region] = 0.0
+        data.block_data[pool] = selected
+        fully_cleared = region.all(dim=1)
+        if bool(fully_cleared.any()):
+            data.block_rgb[pool[fully_cleared]] = 0.0
+        data.block_sums[:n_allocated] = data.block_data[:n_allocated, :, 1].sum(dim=1, dtype=torch.float32)
+        self.mapper._last_voxel_grid = None
+        return cleared
 
     def _inspect_esdf(self, vg) -> bool:
         """Validate a perception ESDF voxel grid before it is pushed to the

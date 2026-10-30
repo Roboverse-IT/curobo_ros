@@ -123,7 +123,7 @@ def test_spheres_are_at_the_joints_at_the_depth_stamp(node, monkeypatch):
            names=names[::-1] + ['finger_joint'])
     joints(node, STAMP_NS + 2 * MS, list(2 * q[::-1]) + [0.7],
            names=names[::-1] + ['finger_joint'])
-    markers = capture(node.sphere_marker_pub, monkeypatch)
+    markers = capture(node.sphere_marker_pub, monkeypatch, subscribed=True)
 
     node.listener_callback_depth(depth())
 
@@ -303,6 +303,56 @@ def test_mesh_and_combined_modes_select_their_backends(node, monkeypatch):
     assert torch.count_nonzero(combined) == 0
 
 
+def test_mask_preserves_every_unmasked_input_pixel(node, monkeypatch):
+    camera_info(node)
+    node.depth_header = depth().header
+    node._frame_transforms = {
+        CAMERA: torch.eye(4, dtype=torch.float32, device='cuda')}
+    node._mesh_segmenter = None
+    node.distance_threshold = -100.0  # all sphere distances are retained
+    image = (0.5 + torch.arange(48 * 64, device='cuda', dtype=torch.float32)
+             .reshape(48, 64) * 0.0001)
+    original = image.clone()
+    q = torch.zeros(
+        len(node._kin_model.joint_names), dtype=torch.float32, device='cuda')
+
+    def center_pixel(depth_image, camera_intrinsics, kinematics_state):
+        mask = torch.zeros_like(depth_image, dtype=torch.bool)
+        mask[24, 32] = True
+        return mask
+
+    monkeypatch.setattr(node, '_mesh_mask_from_state', center_pixel)
+    node._segmentation_mode = 'sphere'
+    assert torch.equal(node._mask_depth_image(image, q), original)
+    node._mesh_segmenter = object()
+    node._segmentation_mode = 'combined'
+    expected = original.clone()
+    expected[24, 32] = 0.0
+    assert torch.equal(node._mask_depth_image(image, q), expected)
+    assert torch.equal(image, original)
+
+    node._segmentation_mode = 'mesh'
+    monkeypatch.setattr(node, 'depth_to_pointcloud',
+                        lambda *args: pytest.fail('mesh-only mode built a point cloud'))
+    assert torch.equal(node._mask_depth_image(image, q), expected)
+
+
+def test_depth_message_preserves_recorded_integer_millimetres(node):
+    # The moving station bag contains 502, 506, and 511 mm readings. Their
+    # float32 metre representations fall just below the integer on * 1000.
+    node.depth_header = depth().header
+    millimetres = np.array([[0, 502, 506, 511]], dtype=np.uint16)
+    metres = torch.as_tensor(
+        millimetres.astype(np.float32) / 1000.0, device='cuda')
+
+    message = node.depth_tensor_to_image_msg(metres)
+
+    assert message.encoding == '16UC1'
+    np.testing.assert_array_equal(
+        np.frombuffer(message.data, dtype=np.uint16).reshape(1, 4),
+        millimetres)
+
+
 def test_tf_and_joint_states_are_stored_while_the_node_is_busy(node):
     # Nothing spins the node, as while it segments a frame: TF and joint
     # states still arrive, on their own threads.
@@ -378,7 +428,7 @@ def test_locked_joints_are_masked_at_their_values_at_the_depth_stamp(franka, mon
     for t_ns, fingers in ((STAMP_NS - 2 * MS, 0.01), (STAMP_NS + 2 * MS, 0.03)):
         franka.listener_callback_joint_states(JointState(
             header=Header(stamp=stamp(t_ns)), name=names, position=[0.0] * 7 + [fingers] * 2))
-    markers = capture(franka.sphere_marker_pub, monkeypatch)
+    markers = capture(franka.sphere_marker_pub, monkeypatch, subscribed=True)
 
     franka.listener_callback_depth(depth())
 
@@ -391,7 +441,7 @@ def test_locked_joints_are_masked_at_their_values_at_the_depth_stamp(franka, mon
 
 def test_locked_joints_keep_their_configured_values_until_measured(franka, monkeypatch):
     ready(franka)  # arm joints only
-    markers = capture(franka.sphere_marker_pub, monkeypatch)
+    markers = capture(franka.sphere_marker_pub, monkeypatch, subscribed=True)
 
     franka.listener_callback_depth(depth())
 
@@ -431,7 +481,7 @@ def test_locked_joints_are_read_through_the_descriptor_joint_states_map(franka, 
     for t_ns in (STAMP_NS - 2 * MS, STAMP_NS + 2 * MS):
         franka.listener_callback_joint_states(JointState(
             header=Header(stamp=stamp(t_ns)), name=names, position=[0.0] * 7 + [40.0] * 2))
-    markers = capture(franka.sphere_marker_pub, monkeypatch)
+    markers = capture(franka.sphere_marker_pub, monkeypatch, subscribed=True)
 
     franka.listener_callback_depth(depth())
 
