@@ -105,12 +105,16 @@ class JointFeedback:
 class SyntheticDepthCamera:
     """A camera with a rasterized cube over a persistent planar background."""
 
-    def __init__(self, base_frame, geometry, pose):
+    def __init__(self, base_frame, geometry, pose, gpu_lock):
         self.node = rclpy.create_node('ur10e_attachment_lifecycle_camera')
         self.tf = self.node.create_publisher(TFMessage, '/tf', 10)
         self.depth = self.node.create_publisher(Image, '/test_camera/depth', 10)
         self.geometry = geometry
         self.pose = pose
+        # This test-only renderer shares the process/CUDA context with the
+        # planner. Production cameras live in separate processes; here its GPU
+        # work must honor the same lock contract as mapper integration.
+        self.gpu_lock = gpu_lock
         self.last_maskable_depth = None
         self.last_stamp_ns = None
         self._tf = TransformStamped()
@@ -141,7 +145,8 @@ class SyntheticDepthCamera:
         return camera_pose, depth
 
     def publish(self):
-        camera_pose, depth = self._render()
+        with self.gpu_lock:
+            camera_pose, depth = self._render()
         stamp = self.node.get_clock().now().to_msg()
         self.last_stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
         t = self._tf.transform.translation
@@ -186,7 +191,9 @@ def test_ur10e_robotiq_attachment_mapper_lifecycle(tmp_path):
         pose0, pose1 = _link_pose(planner, Q0), _link_pose(planner, Q1)
         feedback = JointFeedback(planner.joint_names, Q0)
         time.sleep(0.15)  # establish two stamped history samples before camera frames
-        camera = SyntheticDepthCamera(planner.node.get_parameter('base_link').value, geometry, pose0)
+        camera = SyntheticDepthCamera(
+            planner.node.get_parameter('base_link').value, geometry, pose0,
+            planner.node.gpu_lock)
         _wait_for_frames(planner, 0, 12)
 
         manager = planner.node.config_wrapper_motion.obstacle_manager
@@ -239,7 +246,9 @@ def test_ur10e_robotiq_attachment_mapper_lifecycle(tmp_path):
         assert distance_invalidated < distance_before
 
         previous = planner.node.mapper.get_stats()['frame_count']
-        camera = SyntheticDepthCamera(planner.node.get_parameter('base_link').value, geometry, pose0)
+        camera = SyntheticDepthCamera(
+            planner.node.get_parameter('base_link').value, geometry, pose0,
+            planner.node.gpu_lock)
         _wait_for_frames(planner, previous)
         mask0 = planner.node.object_depth_masker.last_mask
         assert mask0 is not None and int(mask0.sum().item()) > 0
@@ -279,7 +288,9 @@ def test_ur10e_robotiq_attachment_mapper_lifecycle(tmp_path):
         assert 'lifecycle_cube' in manager.disabled_obstacles  # never restore stale pre-grasp pose
 
         previous = planner.node.mapper.get_stats()['frame_count']
-        camera = SyntheticDepthCamera(planner.node.get_parameter('base_link').value, geometry, pose1)
+        camera = SyntheticDepthCamera(
+            planner.node.get_parameter('base_link').value, geometry, pose1,
+            planner.node.gpu_lock)
         _wait_for_frames(planner, previous)
         object_weight_reconstructed = _weight_in_aabb(manager, lower1, upper1)
         assert object_weight_reconstructed > 0.0

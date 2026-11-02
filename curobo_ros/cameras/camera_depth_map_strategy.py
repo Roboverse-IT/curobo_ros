@@ -418,6 +418,14 @@ class DepthMapCameraStrategy(CameraStrategy):
                                   int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec))
                     telemetry.set('last_integrated_monotonic_ns', time.monotonic_ns())
                 self.depth_map = depth_tensor
+                # Only a completed, synchronized integration may schedule the
+                # one-shot ESDF initialization. The timer callback owns the
+                # refresh; keeping it out of this callback avoids extending the
+                # normal depth-processing critical section by the cold kernel
+                # compilation/allocation cost.
+                notify_prewarm = getattr(self.node, 'notify_mapper_integrated', None)
+                if notify_prewarm is not None:
+                    notify_prewarm()
             finally:
                 if gpu_lock is not None:
                     gpu_lock.release()

@@ -59,6 +59,76 @@ from curobo_ros.perception import ObjectDepthMasker
 from curobo_ros.core.runtime_telemetry import RuntimeTelemetry
 
 
+class _EsdfPrewarm:
+    """Coordinate one perception ESDF initialization after a real integration."""
+
+    def __init__(self, enabled, max_attempts=3):
+        self.enabled = bool(enabled)
+        self._max_attempts = int(max_attempts)
+        self._lock = threading.Lock()
+        self._requested = False
+        self._running = False
+        self._ready = False
+        self._attempts = 0
+        self.last_error = None
+
+    def request_after_integration(self):
+        """Request, but do not run, the one-shot warmup after a valid frame."""
+        with self._lock:
+            if (not self.enabled or self._requested or self._running or self._ready
+                    or self._attempts >= self._max_attempts):
+                return False
+            self._requested = True
+            return True
+
+    def take_request(self):
+        """Claim one pending warmup attempt for the executor callback."""
+        with self._lock:
+            if not self._requested or self._running or self._ready:
+                return False
+            self._requested = False
+            self._running = True
+            return True
+
+    def finish(self, ready, error=None):
+        """Record an attempt; failures retain a bounded retry request."""
+        with self._lock:
+            if self._ready:
+                return
+            self._running = False
+            if ready:
+                self._ready = True
+                self.last_error = None
+                return
+            self._attempts += 1
+            self.last_error = error or 'refresh_esdf returned no valid voxel grid'
+            if self._attempts < self._max_attempts:
+                self._requested = True
+
+    def mark_ready_if_requested(self):
+        """A normal query refresh may complete an already-pending warmup."""
+        with self._lock:
+            if self.enabled and (self._requested or self._running):
+                self._requested = False
+                self._running = False
+                self._ready = True
+                self.last_error = None
+
+    def snapshot(self):
+        with self._lock:
+            if not self.enabled:
+                return 'disabled', self._attempts, self.last_error
+            if self._ready:
+                return 'ready', self._attempts, self.last_error
+            if self._running:
+                return 'running', self._attempts, self.last_error
+            if self._requested:
+                return 'requested', self._attempts, self.last_error
+            if self._attempts >= self._max_attempts:
+                return 'failed', self._attempts, self.last_error
+            return 'waiting_for_integration', self._attempts, self.last_error
+
+
 class UnifiedPlannerNode(Node):
     """Unified trajectory planning node with dynamic strategy switching (v2)."""
 
@@ -78,6 +148,9 @@ class UnifiedPlannerNode(Node):
         # re-enter; a different thread (depth callback) fails the non-blocking
         # acquire and simply skips its frame.
         self.gpu_lock = threading.RLock()
+        self.declare_parameter('perception_esdf_prewarm_enabled', True)
+        self._esdf_prewarm = _EsdfPrewarm(
+            self.get_parameter('perception_esdf_prewarm_enabled').value)
         self.declare_parameter('runtime_telemetry_enabled', False)
         self.runtime_telemetry = RuntimeTelemetry(
             self.get_parameter('runtime_telemetry_enabled').value)
@@ -86,6 +159,14 @@ class UnifiedPlannerNode(Node):
             self._runtime_telemetry_pub = self.create_publisher(
                 String, 'planner_runtime_telemetry', 10)
             self.create_timer(1.0, self._publish_runtime_telemetry)
+
+        # This executor callback does no CUDA work until a depth callback has
+        # successfully integrated a real observation. It then uses the same
+        # gpu_lock contract as refresh_perception_world(), rather than issuing
+        # mapper work from an independent thread during graph capture.
+        self._esdf_prewarm_timer = self.create_timer(
+            0.05, self._prewarm_perception_esdf,
+            callback_group=ReentrantCallbackGroup())
 
         # Serializes goal admission: only one execute_trajectory goal may be
         # active at a time (open-loop or reactive). Guards against two
@@ -732,6 +813,41 @@ class UnifiedPlannerNode(Node):
             self.runtime_telemetry.count('esdf_refresh_success' if refreshed else 'esdf_refresh_skipped')
             if refreshed:
                 self.update_all_solvers_world(obs.get_scene())
+                self._esdf_prewarm.mark_ready_if_requested()
+            return refreshed
+
+    def notify_mapper_integrated(self):
+        """Schedule one safe ESDF initialization after the first valid depth frame."""
+        if self._esdf_prewarm.request_after_integration():
+            self.runtime_telemetry.count('esdf_prewarm_requested')
+            self.runtime_telemetry.set('esdf_prewarm_state', 'requested')
+
+    def _prewarm_perception_esdf(self):
+        """Initialize ESDF outside the camera callback after mapper integration."""
+        if not self._esdf_prewarm.take_request():
+            return
+        started = time.perf_counter()
+        refreshed = False
+        error = None
+        try:
+            # refresh_perception_world owns gpu_lock. It serializes this CUDA
+            # work with integration and graph capture; no lock is acquired here.
+            refreshed = self.refresh_perception_world()
+        except Exception as ex:
+            error = str(ex)
+            self.get_logger().warn(f'ESDF pre-warm failed: {error}')
+        self._esdf_prewarm.finish(refreshed, error)
+        state, attempts, last_error = self._esdf_prewarm.snapshot()
+        self.runtime_telemetry.observe_ms(
+            'esdf_prewarm_wall', time.perf_counter() - started)
+        self.runtime_telemetry.count(
+            'esdf_prewarm_success' if refreshed else 'esdf_prewarm_failure')
+        self.runtime_telemetry.set('esdf_prewarm_state', state)
+        self.runtime_telemetry.set('esdf_prewarm_attempts', attempts)
+        if state == 'failed':
+            self.get_logger().warn(
+                'ESDF pre-warm exhausted 3 attempts; collision queries will retain '
+                f'their normal refresh path (last error: {last_error})')
 
     def rebuild_solvers_for_cache_change(self):
         """Rebuild all active solvers after a collision-cache change.

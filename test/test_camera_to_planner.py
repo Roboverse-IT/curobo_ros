@@ -162,19 +162,27 @@ def planner(tmp_path_factory):
 @pytest.fixture(scope='module')
 def camera(planner):
     """Stream the camera, from once the planner has integrated a few of its frames."""
-    assert planner.distance(Q_IN, Q_OUT) == [0.0, 0.0]  # nothing there before the camera
     camera = Camera(planner.node.get_parameter('base_link').value,
                     planner.outermost_sphere(Q_IN))
     deadline = time.monotonic() + 10.0
     while planner.node.mapper.get_stats()['frame_count'] < 15:
         assert time.monotonic() < deadline, 'the depth frames were not integrated'
         time.sleep(0.05)
+    while planner.node._esdf_prewarm.snapshot()[0] != 'ready':
+        assert time.monotonic() < deadline, 'ESDF pre-warm did not finish'
+        time.sleep(0.05)
     yield camera
     camera.destroy()
 
 
+def test_camera_less_collision_world_is_empty(planner):
+    """No mapper integration means no ESDF pre-warm or change to query behavior."""
+    assert planner.node._esdf_prewarm.snapshot()[0] == 'waiting_for_integration'
+    assert planner.distance(Q_IN, Q_OUT) == [0.0, 0.0]
+
+
 def test_collision_distance_sees_the_camera_obstacle(planner, camera):
-    """Before any plan: the distance service brings the world up to date itself."""
+    """The pre-warmed ESDF reaches the collision service before any plan."""
     inside, outside = planner.distance(Q_IN, Q_OUT)
 
     assert inside > 0.0

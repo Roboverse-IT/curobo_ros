@@ -1,6 +1,7 @@
 """Robot segmentation: a depth frame is masked with the TF and joints at its stamp, or dropped."""
 
 import time
+from types import SimpleNamespace
 
 from builtin_interfaces.msg import Time
 from curobo.types import JointState as CuroboJointState
@@ -357,6 +358,41 @@ def test_sphere_mask_matches_broadcast_distance_reference(node):
         - spheres[:, 3].unsqueeze(0), dim=1).values > node.distance_threshold
 
     assert torch.equal(actual, reference)
+
+
+def test_cdist_sphere_mask_boundary_and_invalid_depth_semantics(node):
+    """Keep/mask decisions at a threshold must match the previous broadcast path."""
+    node.depth_header = Header(frame_id=CAMERA)
+    node._frame_transforms = {
+        CAMERA: torch.eye(4, dtype=torch.float32, device='cuda')}
+    node._masks = {}
+    radius = 0.1
+    threshold = node.distance_threshold
+    spheres = torch.tensor(
+        [[0.0, 0.0, 0.0, radius], [0.15, 0.0, 0.0, radius]],
+        dtype=torch.float32, device='cuda')
+    # Inside, on the surface, just outside the threshold, and in the overlap.
+    points = torch.tensor([
+        [-radius + threshold * 0.5, 0.0, 0.0],
+        [-radius, 0.0, 0.0],
+        [-radius - threshold - 1e-3, 0.0, 0.0],
+        [0.075, 0.0, 0.0],
+    ], dtype=torch.float32, device='cuda')
+    state = SimpleNamespace(robot_spheres=spheres.reshape(1, 1, 2, 4))
+
+    actual = node._mask_pointcloud(points, state)
+    reference = torch.min(
+        torch.norm(points.unsqueeze(1) - spheres[:, :3].unsqueeze(0), dim=2)
+        - spheres[:, 3].unsqueeze(0), dim=1).values > threshold
+
+    assert torch.equal(actual, reference)
+    assert actual.tolist() == [False, False, True, False]
+
+    invalid = torch.tensor([[0.0, float('nan'), float('inf'), 0.8]], device='cuda')
+    valid_points, valid = node.depth_to_pointcloud(
+        invalid, {'fx': 1.0, 'fy': 1.0, 'cx': 0.0, 'cy': 0.0})
+    assert valid.tolist() == [[False, False, False, True]]
+    assert valid_points.shape == (1, 3)
 
 
 def test_depth_message_preserves_recorded_integer_millimetres(node):
