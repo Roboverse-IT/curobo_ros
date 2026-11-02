@@ -28,6 +28,7 @@ from curobo_msgs.srv import TrajectoryGeneration
 from curobo_msgs.srv import SetRobotStrategy
 from curobo_msgs.action import SendTrajectory
 from std_srvs.srv import Trigger
+from action_msgs.msg import GoalStatus
 
 @launch_testing.ready_to_test_action_timeout(90.0)
 @pytest.mark.launch_test
@@ -104,6 +105,32 @@ class GeneratedTestSuite(unittest.TestCase):
 
     def tearDown(self):
         self.node.destroy_node()
+
+    def _cancel_after_feedback(self, goal_handle, timeout=90.0):
+        """Cancel a reactive goal after its servo loop is observably active."""
+        deadline = time.monotonic() + timeout
+        while not self.received_feedback and time.monotonic() < deadline:
+            rclpy.spin_once(self.node, timeout_sec=0.1)
+        self.assertGreater(
+            len(self.received_feedback), 0,
+            "Reactive action published no feedback (servo loop did not run)")
+
+        cancel_future = goal_handle.cancel_goal_async()
+        rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=timeout)
+        self.assertTrue(cancel_future.done(), "Reactive goal cancellation timed out")
+        cancel_response = cancel_future.result()
+        self.assertIsNotNone(cancel_response, "Reactive goal cancellation had no response")
+        self.assertGreater(
+            len(cancel_response.goals_canceling), 0,
+            "Reactive goal cancellation was rejected")
+
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout)
+        self.assertTrue(result_future.done(), "Canceled reactive action did not return")
+        wrapped_result = result_future.result()
+        self.assertIsNotNone(wrapped_result, "Canceled reactive action had no result")
+        self.assertEqual(wrapped_result.status, GoalStatus.STATUS_CANCELED)
+        self.assertFalse(wrapped_result.result.success)
 
 
     def test_01_get_planners(self):
@@ -466,35 +493,7 @@ class GeneratedTestSuite(unittest.TestCase):
             self.fail("Goal request to '/unified_planner/execute_trajectory' timed out")
         self.assertTrue(goal_handle.accepted, "Goal was rejected by '/unified_planner/execute_trajectory'")
 
-        # Reactive action: it does NOT terminate on its own. Collect feedback for
-        # a while, then cancel it.
-        _deadline = time.time() + 6.0
-        while time.time() < _deadline:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-        cancel_future = goal_handle.cancel_goal_async()
-        rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=timeout)
-
-        # Wait for the result
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout)
-
-        if result_future.result() is None:
-            self.fail("Action '/unified_planner/execute_trajectory' did not return a result in time")
-
-        result = result_future.result().result
-
-
-        self.assertGreater(
-            len(self.received_feedback),
-            0,
-            "Reactive action published no feedback (servo loop did not run)"
-        )
-
-        self.assertEqual(
-            result.success,
-            False,
-            f"Field 'success' doesn't match expected value"
-        )
+        self._cancel_after_feedback(goal_handle, timeout)
 
     def test_11_set_planner_classic(self):
         """11 Set planner classic"""
@@ -636,35 +635,8 @@ class GeneratedTestSuite(unittest.TestCase):
             self.fail("Goal request to '/unified_planner/execute_trajectory' timed out")
         self.assertTrue(goal_handle.accepted, "Goal was rejected by '/unified_planner/execute_trajectory'")
 
-        # Reactive action: it does NOT terminate on its own. Collect feedback for
-        # a while, then cancel it.
-        _deadline = time.time() + 6.0
-        while time.time() < _deadline:
-            rclpy.spin_once(self.node, timeout_sec=0.1)
-        cancel_future = goal_handle.cancel_goal_async()
-        rclpy.spin_until_future_complete(self.node, cancel_future, timeout_sec=timeout)
+        self._cancel_after_feedback(goal_handle, timeout)
 
-        # Wait for the result
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self.node, result_future, timeout_sec=timeout)
-
-        if result_future.result() is None:
-            self.fail("Action '/unified_planner/execute_trajectory' did not return a result in time")
-
-        result = result_future.result().result
-
-
-        self.assertGreater(
-            len(self.received_feedback),
-            0,
-            "Reactive action published no feedback (servo loop did not run)"
-        )
-
-        self.assertEqual(
-            result.success,
-            False,
-            f"Field 'success' doesn't match expected value"
-        )
 
 @launch_testing.post_shutdown_test()
 class PostShutdownTests(unittest.TestCase):

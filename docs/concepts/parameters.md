@@ -50,6 +50,8 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `trajectory_cache_ttl` | `30.0` | Lifetime (s) of a trajectory cached by `generate_trajectory` and reusable by the execute action (`allow_cached`) | Plan-time |
 | `sparse_voxel_publish_rate` | `7.0` | Publish rate (Hz) of `/unified_planner/voxel_grid_sparse`; `<= 0` disables | Startup |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |
+| `perception_esdf_prewarm_enabled` | `true` | After the first successfully integrated camera frame, initialize and publish the ESDF once through the normal GPU-locked refresh path. No effect without a mapper/camera; collision queries still refresh normally | Startup |
+| `runtime_telemetry_enabled` | `false` | Publish bounded aggregate runtime JSON once per second on `planner_runtime_telemetry`; no per-frame logging or behavior change | Startup |
 | `max_goalset` | `1` | Goal-set size the MotionPlanner is built for; `plan_grasp` needs at least its number of candidates | Build-time |
 | `joint_space_own_planner` | `false` | Joint-space plans on their own MotionPlanner. In cuRobo v0.8.0 a joint-space problem breaks the next pose or grasp problem on the same planner (with CUDA graphs the process crashes; without, a grasp leg that does not move is reported as success). Costs a second solver set on the GPU | Build-time |
 | `grasp_max_attempts` | `3` | `plan_grasp` re-plans when a leg fails its check, up to this many times | Plan-time |
@@ -72,10 +74,31 @@ Declared by the obstacle manager; all are startup/build-time.
 | `mapper_voxel_size` | `0.02` | Internal TSDF voxel size (m) |
 | `mapper_depth_min` / `mapper_depth_max` | `0.1` / `5.0` | Depth clipping range (m) |
 | `decay_half_life_s` | `0.7` | Half-life (s) of stale voxels. Replaces the removed `decay_factor` parameter |
+| `frustum_decay_factor` | `1.0` | Per-integration decay applied only in the current camera frustum; must be in `(0, 1]`. Keep `1.0` unless observation-retention behavior has been measured for the application |
 | `collision_cache_cuboid` / `collision_cache_mesh` | `100` / `100` | Cuboid and mesh slots the solvers are built for. Every slot costs plan time whether used or not (on a Jetson AGX Orin 100 + 100 made plans 3.5x slower than 10 + 1); size them to the largest world you load. `set_collision_cache` still changes them at runtime |
 | `collision_cache_voxel` | `true` | Build the solvers with the voxel (ESDF) layer, sized by `mapper_extent_xyz` and `voxel_size`; `false` for a static world without perception |
 
 The Mapper integrates each depth frame at its own size. The former `mapper_image_width` / `mapper_image_height` parameters are removed; a launch that still sets them, or `decay_factor`, gets a warning at startup and the value is ignored.
+
+## Attached-object depth masking
+
+Attachment collision geometry and camera masking are separate. Attachment works
+for any configured attach link. To remove a known held object from incoming
+depth before it is fused into TSDF, opt in explicitly:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `attached_object_masking_enabled` | `false` | Track attached cuboids or meshes at each image stamp and mask their observed depth before filtering/integration |
+| `attached_object_mask_depth_tolerance_m` | `0.015` | Camera-depth agreement tolerance for the known object mask |
+| `attached_object_mask_dilation_px` | `1` | Pixel dilation after exact object-depth masking |
+| `attached_object_mask_joint_state_max_gap_s` | `0.05` | Maximum interpolation gap for the attachment-link FK at an image stamp |
+
+The feature uses the configured robot's own kinematics and named joint-state
+mapping; it does not create a second robot model. Attach/detach locally
+invalidates the object AABB, refreshes the ESDF/world, and then relies on fresh
+unmasked observations after detachment. Because the attach service has no
+measured release pose, detachment does not restore a stale analytic object at a
+guessed location.
 
 ## Node parameters — MPC (reactive control)
 
@@ -133,6 +156,8 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 | `mesh_raster_stride` | `8` | Low-resolution projection/raster stride. Smaller is more precise and more expensive |
 | `stamp_wait_max_s` | `0.05` | Longest wait (s, steady clock) of a depth frame for the TF and joint states at its stamp; then it is dropped. `0` drops it at once |
 | `joint_state_max_gap_s` | `0.05` | Largest gap (s) between the two joint states around a depth stamp that is still interpolated; a frame in a larger gap is dropped |
+| `runtime_telemetry_enabled` | `false` | Publish bounded aggregate JSON once per second on `segmentation_runtime_telemetry` |
+| `runtime_telemetry_cuda_sample_period` | `0` | CUDA timing sample period in frames; `0` disables it. Sampling synchronizes CUDA and can perturb throughput |
 
 The joint states come from the robot descriptor's `strategy_params.joint_states_topic`; the node does not start without it.
 

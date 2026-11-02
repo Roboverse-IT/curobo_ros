@@ -49,7 +49,9 @@ class Planner:
         self.client = rclpy.create_node('camera_to_planner_client')
         self._node_executor = MultiThreadedExecutor()
         self._node_executor.add_node(self.node)
-        threading.Thread(target=self._node_executor.spin, daemon=True).start()
+        self._node_thread = threading.Thread(
+            target=self._node_executor.spin, daemon=True)
+        self._node_thread.start()
         self._client_executor = SingleThreadedExecutor()  # spun by call()
         self._client_executor.add_node(self.client)
         self._distance = self.client.create_client(
@@ -66,7 +68,10 @@ class Planner:
         self.joint_names = list(self.node.config_wrapper_motion.kin_model.joint_names)
 
     def destroy(self):
-        self._node_executor.shutdown()
+        self._node_executor.shutdown(timeout_sec=5.0)
+        self._node_thread.join(timeout=5.0)
+        if self._node_thread.is_alive():
+            raise RuntimeError('planner node executor did not stop')
         self._client_executor.shutdown()
         self.client.destroy_node()
         self.node.destroy_node()

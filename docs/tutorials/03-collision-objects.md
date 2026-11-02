@@ -81,6 +81,30 @@ kinematics:
 
 If you integrated your own robot ([Tutorial 2](02-adding-your-robot.md)), replicate this block to enable attachment.
 
+### Keeping a held object out of the camera map
+
+If a depth camera observes the held object, enable mapper-aware object masking
+at launch. This is opt-in because it needs timestamped joint feedback and a
+camera observing the object:
+
+```bash
+ros2 launch curobo_ros gen_traj.launch.py \
+  --ros-args -p attached_object_masking_enabled:=true
+```
+
+On attach, the object geometry is registered against the requested attach link.
+For each depth frame, the link pose is computed from the robot configuration at
+that frame's stamp; matching object pixels are removed before TSDF integration.
+The object's local TSDF region is invalidated and the perception collision
+world is refreshed. On detach, the old analytic obstacle remains disabled
+until unmasked camera observations reconstruct the released object. The attach
+service does not include a measured release pose, so it cannot safely insert an
+analytic replacement at an inferred location.
+
+Only cuboids and triangle meshes have depth-mask semantics. Attachment itself
+still requires enough collision-sphere capacity on the attach link; camera
+masking does not add collision geometry.
+
 ## Per-link collision toggling
 
 When the gripper must contact the part it grasps, disable collision for those links instead of removing the object:

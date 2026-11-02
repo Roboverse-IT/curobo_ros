@@ -176,6 +176,11 @@ class UnifiedPlannerNode(Node):
         # set_planner_callback to refuse switching planners mid-goal.
         self._goal_lock = threading.Lock()
         self._goal_active = False
+        # rclpy invokes the cancel callback before the action goal handle is
+        # guaranteed to report ``is_cancel_requested`` to the execute callback.
+        # With one admitted execute goal at a time, retain that accepted-cancel
+        # fact until the action has published its terminal result.
+        self._execution_cancel_requested = False
 
         # Output sampling step (s) of the interpolated trajectory (trajopt) —
         # curobo_ros is the authority on this value (see resolve_interpolation_dt);
@@ -1061,8 +1066,13 @@ class UnifiedPlannerNode(Node):
             self.get_logger().info(f"Executing with {planner.get_planner_name()}")
             success = planner.execute(self.robot_context, goal_handle)
 
-            # Cancel takes precedence over the planner's return value.
-            if goal_handle.is_cancel_requested:
+            # Cancel takes precedence over the planner's return value.  The
+            # explicit flag closes the rclpy scheduling window where
+            # cancel_callback has stopped the planner but is_cancel_requested
+            # has not yet become visible on the execute callback's handle.
+            with self._goal_lock:
+                cancel_requested = self._execution_cancel_requested
+            if goal_handle.is_cancel_requested or cancel_requested:
                 result_msg.success = False
                 result_msg.message = "Execution canceled"
                 goal_handle.canceled()
@@ -1542,10 +1552,13 @@ class UnifiedPlannerNode(Node):
                 )
                 return rclpy.action.GoalResponse.REJECT
             self._goal_active = True
+            self._execution_cancel_requested = False
         self.get_logger().info("Received execution goal")
         return rclpy.action.GoalResponse.ACCEPT
 
     def cancel_callback(self, goal_handle):
+        with self._goal_lock:
+            self._execution_cancel_requested = True
         self.robot_context.stop_robot()
         planner = self.planner_manager.get_current_planner()
         if hasattr(planner, 'cancel'):

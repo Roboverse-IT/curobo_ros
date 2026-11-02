@@ -4,7 +4,7 @@ This intentionally exercises the public ROS services and the real CUDA mapper;
 the only synthetic parts are a depth camera and its timestamped joint feedback.
 """
 
-import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -36,6 +36,30 @@ Q1 = [0.18, -1.15, 1.72, -2.15, -1.57, 0.08]
 # deliberately overlapping the modeled tool region at its attachment link.
 CUBE_DIMS = np.array([0.20, 0.20, 0.20])
 BACKGROUND_DEPTH_M = 1.20
+
+
+def _station_descriptor(tmp_path):
+    """Create a test-local descriptor from explicitly supplied station assets."""
+    root = os.environ.get('CUROBO_ROS_STATION_ASSETS')
+    if not root:
+        pytest.skip(
+            'requires CUROBO_ROS_STATION_ASSETS with packing_station.xrdf and '
+            'ur_robotiq_camera.urdf')
+    root = Path(root)
+    xrdf, urdf = root / 'config/packing_station.xrdf', root / 'config/ur_robotiq_camera.urdf'
+    missing = [str(path) for path in (xrdf, urdf) if not path.is_file()]
+    if missing:
+        pytest.skip('station lifecycle assets not found: ' + ', '.join(missing))
+    descriptor = tmp_path / 'ur10e_robotiq_attach_test.yaml'
+    descriptor.write_text(
+        'name: ur10e_robotiq_attach_test\n'
+        'display_name: Test-only UR10e + Robotiq attachment model\n'
+        f'curobo_xrdf: {xrdf}\n'
+        f'urdf: {urdf}\n'
+        'strategy: emulator\n'
+        'strategy_params:\n'
+        '  joint_states_topic: /ur10e_robotiq_attach_test/joint_states\n')
+    return str(descriptor)
 
 
 def _link_pose(planner, q):
@@ -83,7 +107,7 @@ class JointFeedback:
         self.publisher = self.node.create_publisher(
             JointState, '/ur10e_robotiq_attach_test/joint_states', 100)
         self.names, self.q = list(names), list(q)
-        self.node.create_timer(0.01, self.publish)
+        self.timer = self.node.create_timer(0.01, self.publish)
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self.executor.spin, daemon=True)
@@ -98,7 +122,11 @@ class JointFeedback:
         self.q = list(q)
 
     def destroy(self):
-        self.executor.shutdown()
+        self.timer.cancel()
+        self.executor.shutdown(timeout_sec=5.0)
+        self.thread.join(timeout=5.0)
+        if self.thread.is_alive():
+            raise RuntimeError('joint-feedback executor did not stop')
         self.node.destroy_node()
 
 
@@ -119,7 +147,7 @@ class SyntheticDepthCamera:
         self.last_stamp_ns = None
         self._tf = TransformStamped()
         self._tf.header.frame_id, self._tf.child_frame_id = base_frame, CAMERA
-        self.node.create_timer(1.0 / 30.0, self.publish)
+        self.timer = self.node.create_timer(1.0 / 30.0, self.publish)
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self.executor.spin, daemon=True)
@@ -162,7 +190,11 @@ class SyntheticDepthCamera:
         self.depth.publish(image)
 
     def destroy(self):
-        self.executor.shutdown()
+        self.timer.cancel()
+        self.executor.shutdown(timeout_sec=5.0)
+        self.thread.join(timeout=5.0)
+        if self.thread.is_alive():
+            raise RuntimeError('synthetic-camera executor did not stop')
         self.node.destroy_node()
 
 
@@ -173,6 +205,20 @@ def _wait_for_frames(planner, previous, count=8):
         time.sleep(0.05)
 
 
+def _wait_for_attachment_pose(planner, camera):
+    """Wait until a published camera stamp is bracketed by joint feedback."""
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        stamp_ns = camera.last_stamp_ns
+        if stamp_ns is not None:
+            pose = planner.node.get_attachment_link_pose_at_stamp(
+                'attached_object', stamp_ns)
+            if pose is not None:
+                return pose
+        time.sleep(0.01)
+    raise AssertionError('no camera stamp was covered by attachment joint feedback')
+
+
 def _aabb(geometry, pose):
     return geometry.world_aabb(pose, margin_m=0.0)
 
@@ -180,7 +226,7 @@ def _aabb(geometry, pose):
 def test_ur10e_robotiq_attachment_mapper_lifecycle(tmp_path):
     cameras = tmp_path / 'camera.yaml'
     cameras.write_text(CAMERAS_YAML)
-    descriptor = '/ws/curobo_ros/test/fixtures/ur10e_robotiq_attach_test.yaml'
+    descriptor = _station_descriptor(tmp_path)
     planner = Planner(str(cameras), robot=descriptor, extra_params=(
         '-p', 'attached_object_masking_enabled:=true',
         '-p', 'attached_object_mask_dilation_px:=0',
@@ -261,8 +307,7 @@ def test_ur10e_robotiq_attachment_mapper_lifecycle(tmp_path):
         camera.set_pose(pose1)
         previous = planner.node.mapper.get_stats()['frame_count']
         _wait_for_frames(planner, previous)
-        tracked = planner.node.get_attachment_link_pose_at_stamp('attached_object', camera.last_stamp_ns)
-        assert tracked is not None
+        tracked = _wait_for_attachment_pose(planner, camera)
         np.testing.assert_allclose(tracked[:3], pose1[:3], atol=3e-3)
         mask1 = planner.node.object_depth_masker.last_mask
         assert mask1 is not None and int(mask1.sum().item()) > 0
@@ -296,20 +341,6 @@ def test_ur10e_robotiq_attachment_mapper_lifecycle(tmp_path):
         assert object_weight_reconstructed > 0.0
         distance_reconstructed = planner.distance(Q1)[0]
         assert distance_reconstructed > distance_masked
-        Path('/tmp/ur10e_lifecycle_measurements.json').write_text(json.dumps({
-            'tsdf_object_weight_before': object_weight_before,
-            'tsdf_background_weight_before': background_weight_before,
-            'tsdf_object_weight_after_invalidation': object_weight_invalidated,
-            'tsdf_background_weight_after_invalidation': background_weight_invalidated,
-            'tsdf_object_weight_after_detach_reconstruction': object_weight_reconstructed,
-            'distance_initial': initial_distance,
-            'distance_before_attach': distance_before,
-            'distance_after_invalidation': distance_invalidated,
-            'distance_masked_at_q1': distance_masked,
-            'distance_after_detach_reconstruction': distance_reconstructed,
-            'mask_pixels_q0': int(mask0.sum().item()),
-            'mask_pixels_q1': int(mask1.sum().item()),
-        }, sort_keys=True))
     finally:
         if camera is not None:
             camera.destroy()

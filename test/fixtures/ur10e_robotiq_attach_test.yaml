@@ -1,7 +1,0 @@
-name: ur10e_robotiq_attach_test
-display_name: Test-only UR10e + Robotiq attachment model
-curobo_xrdf: /ws/dynamic_scene/config/packing_station.xrdf
-urdf: /ws/dynamic_scene/config/ur_robotiq_camera.urdf
-strategy: emulator
-strategy_params:
-  joint_states_topic: /ur10e_robotiq_attach_test/joint_states

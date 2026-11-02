@@ -296,6 +296,7 @@ ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/Sen
 | `/unified_planner/scene_obstacles` | `visualization_msgs/MarkerArray` | every 2 s | Markers for all scene obstacles |
 | `/unified_planner/collision_spheres` | `visualization_msgs/MarkerArray` | every 2 s, **off by default** | Robot collision spheres (enable with `set_collision_spheres_enabled`) |
 | `/unified_planner/voxel_grid_sparse` | `curobo_msgs/msg/SparseVoxelGrid` | `sparse_voxel_publish_rate` (default 7 Hz, ≤0 disables) | Occupied voxel indices of the perception layer |
+| `/unified_planner/planner_runtime_telemetry` | `std_msgs/String` | 1 Hz when enabled | Bounded aggregate JSON timing/count summary; disabled by default |
 | `/trajectory` | `trajectory_msgs/JointTrajectory` | on plan | Ghost/preview trajectory for RViz |
 | `/mpc_predicted_path` | `nav_msgs/Path` | MPC active | Predicted end-effector path over the horizon |
 | `/mpc_goal_marker` | `visualization_msgs/Marker` | MPC active | Current MPC goal |
@@ -322,6 +323,7 @@ The active control strategy adds its own topics, configured in the robot descrip
 | Publishes | `/masked_depth_image` | `sensor_msgs/Image` (`16UC1`) |
 | Publishes | `/collision_spheres` | `visualization_msgs/MarkerArray` |
 | Publishes | `/robot_pointcloud_debug` | `sensor_msgs/PointCloud2` |
+| Publishes | `/segmentation_runtime_telemetry` | `std_msgs/String` (1 Hz when enabled) |
 | Service | `/set_mask` | `curobo_msgs/srv/SetMask` |
 | Service | `/remove_mask` | `curobo_msgs/srv/RemoveObject` |
 

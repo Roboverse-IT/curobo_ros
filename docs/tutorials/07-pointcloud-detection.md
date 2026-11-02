@@ -17,6 +17,7 @@ Key properties:
 
 - **Push-based**: integration happens in the camera callback, under a non-blocking GPU lock. Frames arriving while the GPU is busy (e.g. during CUDA-graph capture) are dropped — the next one catches up.
 - **Voxels decay**: stale voxels fade with half-life `decay_half_life_s` (default 0.7 s), so a person walking through the scene doesn't leave a permanent ghost. The decay rate is derived from the cameras' declared `frame_rate_hz`.
+- **One-time ESDF initialization**: after the first valid integration, the node pre-warms ESDF through the same GPU lock used by planning and collision queries. It never builds ESDF from an empty map. A query arriving before this completes can still wait; later queries retain their normal refresh behavior.
 - Only `type: depth_camera` is supported in v2 (the old pull-based point-cloud path was removed).
 
 ## 1. Configure your camera (`cameras.yaml`)
@@ -67,6 +68,10 @@ DepthMap camera initialized with depth topic: /depth_to_rgb/image_raw
 ```
 
 Relevant perception parameters (see [Parameters](../concepts/parameters.md)): `mapper_extent_xyz` (perception volume), `voxel_size`, `decay_half_life_s`. Depth frames are integrated at their own size; cameras of different resolutions can feed the same Mapper.
+
+Set `frustum_decay_factor` only after measuring retained-obstacle behavior for
+your camera path. Its neutral default is `1.0`; it is not a substitute for a
+correct `decay_half_life_s` or adequate observation coverage.
 
 ## 3. Verify obstacles are seen
 
@@ -141,6 +146,20 @@ intrinsics, `base <- camera`, and link poses for GPU projection/rasterization.
 Installed `package://` assets resolve through the ROS index; cuRobo-bundled
 robot assets and uninstalled source packages can also be found automatically
 or through `mesh_asset_roots`.
+
+## Runtime telemetry and limits
+
+Set `runtime_telemetry_enabled:=true` on the planner and/or segmentation node
+to publish bounded aggregate JSON on `planner_runtime_telemetry` and
+`segmentation_runtime_telemetry`. It reports counts and CPU wall-time summaries
+without per-frame logs. CUDA sampling is disabled by default because reading an
+event timing synchronizes the device and changes observed throughput.
+
+Both the depth subscription and the timestamp wait keep only the newest frame.
+This intentionally favors a fresh collision world over processing every camera
+frame under load. Size the mapper, collision world, and hardware for the
+throughput your safety case requires; this tutorial does not constitute a
+real-hardware safety qualification.
 
 ## Tuning
 
