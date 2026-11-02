@@ -2,7 +2,7 @@
 them (``apply_curobo_patches: true``, see robot/robot_description.py).
 
 Reused as-is from the dual-arm bench where they were found and verified; only
-the text is translated. Seven fixes:
+the text is translated. Eight fixes:
 
 1) a joint reindex that does not touch ``knot``
 2) the ``warp.torch`` import
@@ -11,6 +11,24 @@ the text is translated. Seven fixes:
 5) a goal buffer that copies the caller's goal
 6) each tool-pose kernel in its own warp module (NVlabs/curobo dc2383a)
 7) ``solve_cspace`` without ``goal_state`` (NVlabs/curobo #670, core only)
+8) graph-planner steering stops before the first collision (NVlabs/curobo #659)
+
+--- 8) graph-planner steering stops before the first collision ---
+
+WHY. The PRM steers each new edge along a line and keeps the last feasible
+point before a collision. ``LinearConnector._find_last_feasible_point`` weighs
+the infeasible points so that ``torch.min`` picks the LAST of them, not the
+first: the kept node lies inside the obstacle and the edge crosses every
+collision before it. Graph seeds then go through obstacles (37-158 mm in the
+SAG study), trajopt cannot repair them, and long transfers fail whatever the
+graph budget.
+
+WHAT IT DOES. As upstream #659: the point before the first infeasible one, the
+requested endpoint when the whole line is feasible. #659 also raised the graph
+planner's ``max_path_finding_iterations`` from 4 to 10: set where the planner is
+built (config_wrapper_motion._graph_planner_config).
+
+To remove when cuRobo > 0.8.0 is installed.
 
 --- 7) ``solve_cspace`` without ``goal_state`` ---
 
@@ -196,6 +214,18 @@ def apply() -> bool:
 
     TrajOptSolver.solve_cspace = solve_cspace_implicit_goal
     TrajOptSolver._solve_impl = solve_impl
+
+    # 8) graph-planner steering stops before the first collision
+    from curobo._src.graph_planner.graph.connector_linear import LinearConnector
+
+    def last_feasible_before_first_collision(self, line_vec, mask, h):
+        steps = torch.arange(h, device=mask.device).view(1, h)
+        first_infeasible = torch.where(mask == 0, steps, h).min(dim=1).values
+        idx = torch.where(first_infeasible < h, first_infeasible - 1, h - 1).clamp(min=0)
+        points = line_vec[torch.arange(line_vec.shape[0], device=line_vec.device), idx]
+        return torch.cat((points, self._node_idx_padding_buffer.expand(points.shape[0], 1)), dim=1)
+
+    LinearConnector._find_last_feasible_point = last_feasible_before_first_collision
 
     original = ops.jit_inplace_reindex
 

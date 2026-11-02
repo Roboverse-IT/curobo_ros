@@ -1,8 +1,10 @@
-"""Patches 5 and 6: goal buffer ownership, tool-pose kernels and their warp modules."""
+"""Patches 5, 6 and 8: goal buffer, tool-pose kernel modules, graph-planner steering."""
 
 import gc
+from types import SimpleNamespace
 
 import curobo._src.cost.cost_tool_pose as cost_tool_pose
+from curobo._src.graph_planner.graph.connector_linear import LinearConnector
 from curobo._src.solver.manager_goal import GoalManager
 from curobo._src.solver.solve_mode import SolveMode
 from curobo._src.solver.solve_state import SolveState
@@ -87,3 +89,16 @@ def test_tool_pose_kernel_switch_keeps_loaded_modules(sequence):
                     f'step {step} (goalset {size}): module of goalset {prepared_size} changed')
         del kernel
     assert not problems, '; '.join(problems)
+
+
+@pytest.mark.parametrize('feasible, expected', [
+    ('11111', 4), ('11010', 1), ('10111', 0), ('01111', 0), ('11100', 2)],
+    ids=['free', 'two_obstacles', 'one_step_in', 'start_blocked', 'obstacle_at_end'])
+def test_steering_stops_before_the_first_collision(feasible, expected):
+    """The steered node is the last feasible point before the first collision on the line."""
+    h = len(feasible)
+    line = torch.arange(h, dtype=torch.float32).view(1, h, 1).repeat(1, 1, 2)
+    mask = torch.tensor([[int(c) for c in feasible]], dtype=torch.int8)
+    connector = SimpleNamespace(_node_idx_padding_buffer=torch.zeros(1))
+    node = LinearConnector._find_last_feasible_point(connector, line, mask, h)
+    assert node[0, 0].item() == expected

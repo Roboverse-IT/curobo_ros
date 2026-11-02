@@ -516,6 +516,7 @@ class UnifiedPlannerNode(Node):
                         self.get_logger().error(f"obstacle '{name}' in {label}: {e}")
                         if name not in failed:
                             failed.append(name)
+            self._reset_graph_planners()
         return failed
 
     def apply_robot_sphere_states(self):
@@ -540,7 +541,21 @@ class UnifiedPlannerNode(Node):
                 except RuntimeError as e:
                     self.get_logger().error(f"robot collision spheres in {label}: {e}")
                     failed.append(label)
+            self._reset_graph_planners()
         return failed
+
+    def _reset_graph_planners(self):
+        """Drop every solver's graph-planner roadmap; call with gpu_lock.
+
+        cuRobo resets it only on update_world: edges checked before an obstacle
+        was switched on, or before an object was attached, would otherwise stay
+        valid and seed trajectories through it. Rebuilt at the next graph-seeded
+        plan.
+        """
+        for _, solver in self._solvers():
+            graph = getattr(solver, 'graph_planner', None)
+            if graph is not None:
+                graph.reset_buffer()
 
     def apply_solver_states(self):
         """Robot and obstacle state onto every solver. For a solver just built:

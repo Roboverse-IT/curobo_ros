@@ -42,6 +42,18 @@ from curobo._src.types.device_cfg import DeviceCfg
 from .config_wrapper import ConfigWrapper, resolve_use_cuda_graph
 
 
+def _graph_planner_config():
+    """Return cuRobo's graph-planner YAML with upstream #659's 10 path-finding iterations.
+
+    0.8.0 ships 4. Goes with curobo_patches fix 8; drop when cuRobo > 0.8.0 is
+    installed.
+    """
+    from curobo._src.util_file import get_task_configs_path, join_path, load_yaml
+    cfg = load_yaml(join_path(get_task_configs_path(), 'graph_planner/exact_graph_planner.yml'))
+    cfg['graph_planner']['max_path_finding_iterations'] = 10
+    return cfg
+
+
 class ConfigWrapperMotion(ConfigWrapper):
     """Motion planner config wrapper (v2 `MotionPlanner`)."""
 
@@ -145,6 +157,7 @@ class ConfigWrapperMotion(ConfigWrapper):
             max_batch_size=self.max_batch_size,
             multi_env=self.multi_env,
             max_goalset=max_goalset,
+            graph_planner_config=_graph_planner_config(),
         )
         planner = MotionPlanner(cfg)
 
