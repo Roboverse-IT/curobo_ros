@@ -12,6 +12,7 @@ from tf2_ros import TransformException
 import torch
 import numpy as np
 import math
+import time
 
 # How long a depth frame may wait for the TF at its stamp. Covers TF publishers
 # down to 20 Hz: the TF sample after the stamp then arrives at most 50 ms later.
@@ -243,6 +244,9 @@ class DepthMapCameraStrategy(CameraStrategy):
         Args:
             msg: Image message
         """
+        telemetry = getattr(self.node, 'runtime_telemetry', None)
+        if telemetry is not None:
+            telemetry.count('mapper_depth_callback')
         # Intrinsics and extrinsics belong to the configured frame: a depth
         # image from any other frame would be projected with the wrong pose.
         if msg.header.frame_id != self._frame_id:
@@ -251,6 +255,8 @@ class DepthMapCameraStrategy(CameraStrategy):
                 f"match the configured frame_id '{self._frame_id}'. Dropping this "
                 'depth frame (no integration).',
                 throttle_duration_sec=2.0)
+            if telemetry is not None:
+                telemetry.count('mapper_reject_frame_id')
             return
         if self.camera_pose_static is not None:
             self._integrate(msg, self.camera_pose_static)
@@ -266,6 +272,8 @@ class DepthMapCameraStrategy(CameraStrategy):
                 f'Depth image on {self._topic} has no header stamp. '
                 'Dropping this depth frame (no integration).',
                 throttle_duration_sec=2.0)
+            if telemetry is not None:
+                telemetry.count('mapper_reject_zero_stamp')
             return
 
         self._stamp_wait.submit(msg, stamp)
@@ -290,6 +298,9 @@ class DepthMapCameraStrategy(CameraStrategy):
                 f'at {stamp.nanoseconds * 1e-9:.6f} s: '
                 f'{ex}. Dropping this depth frame (no integration).',
                 throttle_duration_sec=2.0)
+            telemetry = getattr(self.node, 'runtime_telemetry', None)
+            if telemetry is not None:
+                telemetry.count('mapper_reject_tf')
             return
         translation = t.transform.translation
         position = [translation.x, translation.y, translation.z]
@@ -309,9 +320,13 @@ class DepthMapCameraStrategy(CameraStrategy):
             pose: Camera pose in the base frame, a cuRobo Pose or a plain
                 [x, y, z, qw, qx, qy, qz] list (converted on the GPU below).
         """
+        telemetry = getattr(self.node, 'runtime_telemetry', None)
+        if telemetry is not None:
+            telemetry.count('mapper_integration_started')
         try:
             # ---- CPU-only work first (safe to run during a CUDA graph capture) ----
             # Convert ROS image to numpy (millimetres 16UC1 or metres 32FC1).
+            decode_started = time.perf_counter()
             if msg.encoding == "16UC1":
                 depth_img = self.bridge.imgmsg_to_cv2(msg, "16UC1")
                 depth_img_float = depth_img.astype(np.float32) / 1000.0
@@ -320,6 +335,8 @@ class DepthMapCameraStrategy(CameraStrategy):
             else:
                 self.node.get_logger().warn(f"Unsupported depth encoding: {msg.encoding}, trying 32FC1")
                 depth_img_float = self.bridge.imgmsg_to_cv2(msg, "32FC1")
+            if telemetry is not None:
+                telemetry.observe_ms('mapper_decode_wall', time.perf_counter() - decode_started)
 
             # ---- GPU section: EVERY CUDA op is under the lock ----
             # depth->cuda, pose->cuda, rgb alloc AND mapper.integrate are all GPU
@@ -334,14 +351,19 @@ class DepthMapCameraStrategy(CameraStrategy):
                     "No mapper on node - depth frame ignored. "
                     "Unified planner should expose `node.mapper` (curobo.perception.Mapper).",
                     throttle_duration_sec=5.0)
+                if telemetry is not None:
+                    telemetry.count('mapper_reject_unavailable')
                 return
             gpu_lock = getattr(self.node, 'gpu_lock', None)
             if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
                 self.node.get_logger().debug(
                     "depth frame skipped (GPU capture in progress)",
                     throttle_duration_sec=2.0)
+                if telemetry is not None:
+                    telemetry.count('mapper_skip_gpu_lock_busy')
                 return
             try:
+                prepare_started = time.perf_counter()
                 if isinstance(pose, Pose):
                     self.camera_pose = pose
                 else:
@@ -354,12 +376,18 @@ class DepthMapCameraStrategy(CameraStrategy):
                 # before FilterDepth can spread values into its holes.
                 object_masker = getattr(self.node, 'object_depth_masker', None)
                 if object_masker is not None:
+                    object_started = time.perf_counter()
                     stamp_ns = (int(msg.header.stamp.sec) * 1_000_000_000
                                 + int(msg.header.stamp.nanosec))
                     depth_tensor, _ = object_masker.apply(
                         depth_tensor, self.intrinsics, self.camera_pose,
                         stamp_ns=stamp_ns)
+                    if telemetry is not None:
+                        telemetry.observe_ms('object_mask_wall', time.perf_counter() - object_started)
+                filter_started = time.perf_counter()
                 depth_tensor = self._filter_depth(depth_tensor)
+                if telemetry is not None:
+                    telemetry.observe_ms('filter_depth_wall', time.perf_counter() - filter_started)
 
                 # v2 Mapper requires a leading camera dimension on every field and a
                 # paired rgb image (zero buffer — no colour for collision mapping).
@@ -372,22 +400,35 @@ class DepthMapCameraStrategy(CameraStrategy):
                 data_camera = CameraObservation(
                     depth_image=depth_b, rgb_image=rgb_b,
                     intrinsics=intrinsics_b, pose=self.camera_pose)
+                if telemetry is not None:
+                    telemetry.observe_ms('mapper_prepare_wall', time.perf_counter() - prepare_started)
 
                 # Mapper applies its global time decay once per integration.
                 # Keep one timestamp on the shared mapper, rather than one per
                 # camera, so interleaved cameras decay by elapsed observation
                 # time instead of each applying a nominal-FPS multiplier.
                 self._set_temporal_decay(mapper, msg)
+                integrate_started = time.perf_counter()
                 mapper.integrate(data_camera)
                 torch.cuda.synchronize()
+                if telemetry is not None:
+                    telemetry.observe_ms('mapper_integrate_wall', time.perf_counter() - integrate_started)
+                    telemetry.count('mapper_integrated')
+                    telemetry.set('last_integrated_stamp_ns',
+                                  int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec))
+                    telemetry.set('last_integrated_monotonic_ns', time.monotonic_ns())
                 self.depth_map = depth_tensor
             finally:
                 if gpu_lock is not None:
                     gpu_lock.release()
 
         except CvBridgeError as e:
+            if telemetry is not None:
+                telemetry.count('mapper_processing_exception')
             self.node.get_logger().error(f"CvBridge error: {e}")
         except Exception as e:
+            if telemetry is not None:
+                telemetry.count('mapper_processing_exception')
             self.node.get_logger().error(f"Error processing depth image: {e}")
 
     def _set_temporal_decay(self, mapper, msg):

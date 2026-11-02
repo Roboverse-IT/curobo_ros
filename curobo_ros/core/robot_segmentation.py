@@ -1,5 +1,7 @@
 import os
 import struct
+import json
+import time
 
 import numpy as np
 import torch
@@ -11,6 +13,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_msgs.msg import Header
+from std_msgs.msg import String
 import tf2_ros
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -33,6 +36,7 @@ from curobo_ros.robot.joint_state_history import (
 from curobo_ros.robot.locked_joints import LockedJoints
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.robot.robot_description import resolve_curobo_config, resolve_request_file
+from curobo_ros.core.runtime_telemetry import RuntimeTelemetry
 
 
 class DepthMapRobotSegmentation(Node):
@@ -76,6 +80,10 @@ class DepthMapRobotSegmentation(Node):
         # Largest gap (s) between the two joint states around a depth stamp
         # that is still interpolated; a frame in a larger gap is dropped.
         self.declare_parameter('joint_state_max_gap_s', DEFAULT_JOINT_STATE_MAX_GAP_S)
+        # Runtime telemetry is deliberately opt-in: aggregate summaries are
+        # published once per second, never one log line per depth frame.
+        self.declare_parameter('runtime_telemetry_enabled', False)
+        self.declare_parameter('runtime_telemetry_cuda_sample_period', 0)
         self.mask_margin = self.get_parameter('mask_margin').get_parameter_value().double_value
         self.distance_threshold = self.get_parameter(
             'distance_threshold').get_parameter_value().double_value
@@ -128,6 +136,14 @@ class DepthMapRobotSegmentation(Node):
 
         self._ops_dtype = ops_dtype
         self._device = torch.device('cuda')
+        self._runtime_telemetry = RuntimeTelemetry(
+            self.get_parameter('runtime_telemetry_enabled').value)
+        self._telemetry_cuda_period = int(self.get_parameter(
+            'runtime_telemetry_cuda_sample_period').value)
+        if self._telemetry_cuda_period < 0:
+            raise ValueError('runtime_telemetry_cuda_sample_period must be >= 0')
+        self._telemetry_frame_index = 0
+        self._arrival_monotonic_ns = {}
 
         # ---- Robot: single descriptor-driven source (was: a hardcoded m1013
         # path here, independent of RobotContext's own robot resolution — two
@@ -283,6 +299,10 @@ class DepthMapRobotSegmentation(Node):
 
         # Publisher for the masked depth image
         self.publisher_ = self.create_publisher(Image, "masked_depth_image", 10)
+        self._telemetry_pub = None
+        if self._runtime_telemetry.enabled:
+            self._telemetry_pub = self.create_publisher(String, 'segmentation_runtime_telemetry', 10)
+            self.create_timer(1.0, self._publish_runtime_telemetry)
 
         # Publisher for collision spheres visualization
         self.sphere_marker_pub = self.create_publisher(MarkerArray, 'collision_spheres', 10)
@@ -428,14 +448,20 @@ class DepthMapRobotSegmentation(Node):
         # rather than a 100Hz timer that republished the same frame -- nvblox
         # then re-integrated the same depth data ~6x (wasted GPU work, competing
         # with the MPPI solve). See debug 2026-07-15.
+        self._runtime_telemetry.count('depth_callback')
+        stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+        self._arrival_monotonic_ns[stamp.nanoseconds] = time.monotonic_ns()
+        if len(self._arrival_monotonic_ns) > 256:
+            del self._arrival_monotonic_ns[next(iter(self._arrival_monotonic_ns))]
         if self.camera_info is None:
+            self._runtime_telemetry.count('reject_no_camera_info')
             self.get_logger().warn(
                 'No camera info received yet. Dropping this depth frame (nothing published).',
                 throttle_duration_sec=5.0)
             return
         # A zero stamp would make tf2 return the latest transform.
-        stamp = rclpy.time.Time.from_msg(msg.header.stamp)
         if stamp.nanoseconds == 0:
+            self._runtime_telemetry.count('reject_zero_stamp')
             self._drop('the depth image has no header stamp', stamp)
             return
         self._stamp_wait.submit(msg, stamp)
@@ -457,6 +483,13 @@ class DepthMapRobotSegmentation(Node):
         return frames
 
     def _drop(self, reason, stamp):
+        self._runtime_telemetry.count('rejected')
+        if reason.startswith('No joint'):
+            self._runtime_telemetry.count('reject_joint_stamp')
+        elif reason.startswith('No TF'):
+            self._runtime_telemetry.count('reject_tf_stamp')
+        else:
+            self._runtime_telemetry.count('reject_other')
         self.get_logger().warn(
             f'{reason}. Dropping this depth frame (stamp {stamp.nanoseconds * 1e-9:.6f} s, '
             'nothing published).',
@@ -469,6 +502,11 @@ class DepthMapRobotSegmentation(Node):
         Masking with any other pose would cut the robot where it was not at
         capture time, and leave it in the depth where it was.
         """
+        started = time.perf_counter()
+        arrival = self._arrival_monotonic_ns.pop(stamp.nanoseconds, None)
+        if arrival is not None:
+            self._runtime_telemetry.observe_ms(
+                'arrival_to_processing_wall', (time.monotonic_ns() - arrival) * 1e-9)
         q, reason = self._joint_history.at(stamp)
         if q is None:
             self._drop(f'No joint positions at the depth stamp: {reason}', stamp)
@@ -494,8 +532,10 @@ class DepthMapRobotSegmentation(Node):
             except tf2_ros.TransformException as ex:
                 self._drop(f'No TF {frame} -> {base} at the depth stamp: {ex}', stamp)
                 return
+        self._runtime_telemetry.observe_ms('stamp_lookup_wall', time.perf_counter() - started)
 
         try:
+            convert_started = time.perf_counter()
             # Convert ROS Image message to numpy array
             # Assuming depth is in millimeters (16UC1) or meters (32FC1)
             if msg.encoding == "16UC1":
@@ -515,12 +555,16 @@ class DepthMapRobotSegmentation(Node):
             # base <- frame at the depth stamp, for the depth frame and every
             # mask frame of this depth frame.
             self._frame_transforms = transforms
+            self._runtime_telemetry.observe_ms('input_prepare_wall',
+                                               time.perf_counter() - convert_started)
 
         except CvBridgeError as e:
+            self._runtime_telemetry.count('processing_exception')
             self.get_logger().error(f"CvBridge Error: {e}")
             return
 
         self.q_js.position = torch.tensor(q, dtype=self._ops_dtype, device=self._device)
+        self._runtime_telemetry.count('accepted_stamp')
         self.segment_and_publish()
 
     def segment_and_publish(self):
@@ -528,9 +572,30 @@ class DepthMapRobotSegmentation(Node):
         Performs the segmentation by masking the robot in the depth image.
         Publishes the filtered depth image as a ROS2 message.
         """
+        self._telemetry_frame_index += 1
+        sample_cuda = (self._runtime_telemetry.enabled and self._telemetry_cuda_period
+                       and self._telemetry_frame_index % self._telemetry_cuda_period == 0)
+        start_event = end_event = None
+        if sample_cuda:
+            start_event, end_event = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start_event.record()
+        mask_started = time.perf_counter()
         masked_depth = self._mask_depth_image(self.depth_image, self.q_js.position)
+        self._runtime_telemetry.observe_ms('mask_pipeline_wall', time.perf_counter() - mask_started)
+        output_started = time.perf_counter()
         masked_depth_msg = self.depth_tensor_to_image_msg(masked_depth)
         self.publisher_.publish(masked_depth_msg)
+        self._runtime_telemetry.observe_ms('output_publish_wall', time.perf_counter() - output_started)
+        self._runtime_telemetry.count('published')
+        if sample_cuda:
+            end_event.record()
+            end_event.synchronize()  # controlled sampled mode only
+            self._runtime_telemetry.observe_ms('sampled_segment_gpu',
+                                               start_event.elapsed_time(end_event) * 1e-3)
+
+    def _publish_runtime_telemetry(self):
+        if self._telemetry_pub is not None:
+            self._telemetry_pub.publish(String(data=json.dumps(self._runtime_telemetry.snapshot(), sort_keys=True)))
 
     def depth_to_pointcloud(self, depth_image: torch.Tensor, camera_intrinsics: dict) -> torch.Tensor:
         """
@@ -665,9 +730,11 @@ class DepthMapRobotSegmentation(Node):
 
         # Compute FK once. Sphere and mesh backends consume this same state, so
         # both geometries correspond to the depth stamp's interpolated joints.
+        fk_started = time.perf_counter()
         q_batched = q.unsqueeze(0) if q.ndim == 1 else q
         js = JointState(position=q_batched, joint_names=self._kin_model.joint_names)
         kinematics_state = self._kin_model.compute_kinematics(js)
+        self._runtime_telemetry.observe_ms('fk_wall', time.perf_counter() - fk_started)
         robot_spheres = kinematics_state.robot_spheres.reshape(-1, 4)
         if self.sphere_marker_pub.get_subscription_count() > 0:
             self.publish_collision_spheres(robot_spheres)
@@ -676,17 +743,22 @@ class DepthMapRobotSegmentation(Node):
         points = valid_mask = None
         use_spheres = self._segmentation_mode in ('sphere', 'combined')
         if use_spheres or self._masks:
+            sphere_started = time.perf_counter()
             points, valid_mask = self.depth_to_pointcloud(
                 depth_image, camera_intrinsics)
             point_keep = self._mask_pointcloud(
                 points, kinematics_state, include_spheres=use_spheres)
             full_mask[valid_mask] = ~point_keep
+            self._runtime_telemetry.observe_ms('sphere_object_mask_wall',
+                                               time.perf_counter() - sphere_started)
 
         # Union the projected link silhouettes with the 3D sphere/object mask.
         if self._mesh_segmenter is not None:
+            mesh_started = time.perf_counter()
             mesh_mask = self._mesh_mask_from_state(
                 depth_image, camera_intrinsics, kinematics_state)
             full_mask.logical_or_(mesh_mask)
+            self._runtime_telemetry.observe_ms('mesh_mask_wall', time.perf_counter() - mesh_started)
 
         if self.robot_pointcloud_pub.get_subscription_count() > 0:
             if points is None:
@@ -751,11 +823,12 @@ class DepthMapRobotSegmentation(Node):
         points_base = self._transform_points_to_base(point_cloud)
 
         if include_spheres:
-            points = points_base.unsqueeze(1)  # (N, 1, 3)
-            spheres_centers = robot_spheres[:, :3].unsqueeze(0)  # (1, S, 3)
-            spheres_radii = robot_spheres[:, 3].unsqueeze(0)  # (1, S)
-            distances = torch.norm(
-                points - spheres_centers, dim=2) - spheres_radii
+            # cdist computes the same Euclidean point-to-centre distances as
+            # the former N×S×3 broadcast, without materialising that larger
+            # intermediate tensor for every depth frame.
+            distances = (
+                torch.cdist(points_base, robot_spheres[:, :3])
+                - robot_spheres[:, 3])
             min_distances, _ = torch.min(distances, dim=1)
             mask = min_distances > self.distance_threshold
         else:

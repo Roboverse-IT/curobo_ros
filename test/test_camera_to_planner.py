@@ -41,9 +41,10 @@ CAMERAS_YAML = f"""cameras:
 class Planner:
     """The planner node and a client of its services, each spun on its own thread."""
 
-    def __init__(self, cameras_yaml):
-        rclpy.init(args=['--ros-args', '-p', 'robot:=ur10e_xrdf',
-                         '-p', f'cameras_config_file:={cameras_yaml}'])
+    def __init__(self, cameras_yaml, robot='ur10e_xrdf', extra_params=()):
+        rclpy.init(args=['--ros-args', '-p', f'robot:={robot}',
+                         '-p', f'cameras_config_file:={cameras_yaml}',
+                         *extra_params])
         self.node = UnifiedPlannerNode()
         self.client = rclpy.create_node('camera_to_planner_client')
         self._node_executor = MultiThreadedExecutor()

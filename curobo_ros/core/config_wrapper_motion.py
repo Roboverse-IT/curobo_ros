@@ -15,6 +15,7 @@ v2 notes:
 """
 
 from functools import partial
+import time
 import torch
 import rclpy
 
@@ -185,10 +186,19 @@ class ConfigWrapperMotion(ConfigWrapper):
         # One atomic query, as a plan: under gpu_lock, the solvers are brought
         # up to date with the robot (its locked joints) and the cameras, then
         # queried, with no other GPU work in between.
+        telemetry = getattr(node, 'runtime_telemetry', None)
+        started = time.perf_counter()
+        lock_started = time.perf_counter()
         with node.gpu_lock:
+            if telemetry is not None:
+                telemetry.observe_ms('collision_gpu_lock_wait', time.perf_counter() - lock_started)
             try:
+                refresh_started = time.perf_counter()
                 if hasattr(node, 'refresh_perception_world'):
                     node.refresh_perception_world()
+                if telemetry is not None:
+                    telemetry.observe_ms('collision_refresh_world_wall',
+                                         time.perf_counter() - refresh_started)
                 if request.trajectory:
                     positions = [list(js.position) for js in request.trajectory]
                 else:
@@ -196,7 +206,23 @@ class ConfigWrapperMotion(ConfigWrapper):
             except ValueError as ex:  # joint states past joint_states.max_age_s
                 node.get_logger().error(f'get_collision_distance: {ex}')
                 return _no_distance(response)
-            return _sphere_distance(self, node, response, positions)
+            result = _sphere_distance(self, node, response, positions)
+        if telemetry is not None:
+            now_ns = time.monotonic_ns()
+            telemetry.count('collision_query')
+            telemetry.observe_ms('collision_query_wall', time.perf_counter() - started)
+            snap = telemetry.snapshot().get('fields', {})
+            last = snap.get('last_integrated_monotonic_ns')
+            if last is not None:
+                map_age_ms = (now_ns - last) * 1e-6
+                telemetry.set('map_processing_age_ms', map_age_ms)
+                telemetry.observe_ms('map_processing_age', map_age_ms * 1e-3)
+            world = snap.get('last_world_update_monotonic_ns')
+            if world is not None:
+                world_age_ms = (now_ns - world) * 1e-6
+                telemetry.set('world_processing_age_ms', world_age_ms)
+                telemetry.observe_ms('world_processing_age', world_age_ms * 1e-3)
+        return result
 
 
 

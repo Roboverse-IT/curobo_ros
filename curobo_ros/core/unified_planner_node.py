@@ -20,6 +20,7 @@ v2 notes:
 import threading
 import time
 import traceback
+import json
 
 import rclpy
 import rclpy.time
@@ -31,6 +32,7 @@ from rclpy.node import Node
 
 from rcl_interfaces.msg import ParameterDescriptor
 from sensor_msgs.msg import JointState as JointStateMsg
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from curobo_msgs.srv import TrajectoryGeneration, SetPlanner, GetPlanners
 from curobo_msgs.action import GraspPlan, SendTrajectory
@@ -54,6 +56,7 @@ from curobo_ros.planners import (
     SinglePlanner,
 )
 from curobo_ros.perception import ObjectDepthMasker
+from curobo_ros.core.runtime_telemetry import RuntimeTelemetry
 
 
 class UnifiedPlannerNode(Node):
@@ -75,6 +78,14 @@ class UnifiedPlannerNode(Node):
         # re-enter; a different thread (depth callback) fails the non-blocking
         # acquire and simply skips its frame.
         self.gpu_lock = threading.RLock()
+        self.declare_parameter('runtime_telemetry_enabled', False)
+        self.runtime_telemetry = RuntimeTelemetry(
+            self.get_parameter('runtime_telemetry_enabled').value)
+        self._runtime_telemetry_pub = None
+        if self.runtime_telemetry.enabled:
+            self._runtime_telemetry_pub = self.create_publisher(
+                String, 'planner_runtime_telemetry', 10)
+            self.create_timer(1.0, self._publish_runtime_telemetry)
 
         # Serializes goal admission: only one execute_trajectory goal may be
         # active at a time (open-loop or reactive). Guards against two
@@ -480,6 +491,7 @@ class UnifiedPlannerNode(Node):
                 "solvers see analytic primitives ONLY, no camera obstacles",
                 throttle_duration_sec=5.0)
 
+        started = time.perf_counter()
         for planner in (self.motion_planner, self.joint_space_motion_planner):
             if planner is not None:
                 planner.update_world(scene)
@@ -496,6 +508,14 @@ class UnifiedPlannerNode(Node):
         # update_world reloads every obstacle switched on: switch the ones
         # recorded as off back off (no-op when there are none).
         self.apply_obstacle_states()
+        self.runtime_telemetry.observe_ms('solver_world_propagation_wall',
+                                          time.perf_counter() - started)
+        self.runtime_telemetry.set('last_world_update_monotonic_ns', time.monotonic_ns())
+
+    def _publish_runtime_telemetry(self):
+        if self._runtime_telemetry_pub is not None:
+            self._runtime_telemetry_pub.publish(String(
+                data=json.dumps(self.runtime_telemetry.snapshot(), sort_keys=True)))
 
     def _solvers(self):
         """
@@ -702,8 +722,15 @@ class UnifiedPlannerNode(Node):
         # ESDF recompute + world push are GPU ops — hold the lock so they never
         # overlap a concurrent depth integrate / graph capture.
         with self.gpu_lock:
+            locked_started = time.perf_counter()
             self.refresh_locked_joints()
-            if obs.refresh_esdf():
+            self.runtime_telemetry.observe_ms(
+                'refresh_locked_joints_wall', time.perf_counter() - locked_started)
+            started = time.perf_counter()
+            refreshed = obs.refresh_esdf()
+            self.runtime_telemetry.observe_ms('esdf_refresh_wall', time.perf_counter() - started)
+            self.runtime_telemetry.count('esdf_refresh_success' if refreshed else 'esdf_refresh_skipped')
+            if refreshed:
                 self.update_all_solvers_world(obs.get_scene())
 
     def rebuild_solvers_for_cache_change(self):

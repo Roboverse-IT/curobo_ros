@@ -337,6 +337,28 @@ def test_mask_preserves_every_unmasked_input_pixel(node, monkeypatch):
     assert torch.equal(node._mask_depth_image(image, q), expected)
 
 
+def test_sphere_mask_matches_broadcast_distance_reference(node):
+    node.depth_header = Header(frame_id=CAMERA)
+    node._frame_transforms = {
+        CAMERA: torch.eye(4, dtype=torch.float32, device='cuda')}
+    q = torch.zeros(
+        len(node._kin_model.joint_names), dtype=torch.float32, device='cuda')
+    state = node._kin_model.compute_kinematics(CuroboJointState(
+        position=q.unsqueeze(0), joint_names=node._kin_model.joint_names))
+    spheres = state.robot_spheres.reshape(-1, 4)
+    # Exercise both sides of the configured mask threshold around multiple
+    # current collision spheres, with a base==camera transform for this unit.
+    offsets = torch.tensor([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]], device='cuda')
+    points = (spheres[:8, :3].unsqueeze(1) + offsets).reshape(-1, 3)
+
+    actual = node._mask_pointcloud(points, state)
+    reference = torch.min(
+        torch.norm(points.unsqueeze(1) - spheres[:, :3].unsqueeze(0), dim=2)
+        - spheres[:, 3].unsqueeze(0), dim=1).values > node.distance_threshold
+
+    assert torch.equal(actual, reference)
+
+
 def test_depth_message_preserves_recorded_integer_millimetres(node):
     # The moving station bag contains 502, 506, and 511 mm readings. Their
     # float32 metre representations fall just below the integer on * 1000.
