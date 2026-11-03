@@ -55,6 +55,8 @@ A bare `curobo_config` name that does not exist next to the descriptor is one of
 
 `apply_curobo_patches: true` applies the fixes in `curobo_ros/core/curobo_patches.py` before any solver is built: disabling a *mesh* obstacle (which cuRobo v0.8.0 cannot do when a cuboid cache exists, and which attaching a mesh object relies on), a joint reindex that fails when locked joints precede the active ones in the chain, and `plan_grasp` start states that carry a trajectory `dt` (it makes the IK fail from then on). Off by default.
 
+`follow_locked_joints: {joints: [<joint>, ...], joint_states_topic: <topic>}` keeps those locked joints (e.g. the gripper fingers, locked at the XRDF's fully open value) at their measured position: before every plan the node takes the latest message of `joint_states_topic` (default: `strategy_params.joint_states_topic`; no per-message callback), reads the joints by name and swaps their transforms into every model, so the planner sees the fingers as open as they really are. Joints not measured yet stay at the XRDF value. Off by default.
+
 Attaching objects needs sphere slots on the attach link: in an XRDF, as many placeholder spheres (radius `-100`) on `attached_object` as the payload may use; in a cuRobo YAML, `extra_collision_spheres: {attached_object: N}`.
 
 ## 2. The cuRobo robot configuration

@@ -184,6 +184,10 @@ class RobotDescription:
     strategy_key: str
     strategy_params: dict = field(default_factory=dict)
     apply_curobo_patches: bool = False   # opt-in, see core/curobo_patches.py
+    # Locked joints that follow the measured joint state (core/locked_joints.py), and
+    # the JointState topic they are read from (default: the strategy's).
+    follow_locked_joints: List[str] = field(default_factory=list)
+    follow_locked_joints_topic: str = ''
     _joint_names: Optional[List[str]] = None
     _dof: Optional[int] = None
 
@@ -273,6 +277,10 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
         strategy_key=strategy_key,
         strategy_params=strategy_params,
         apply_curobo_patches=bool(desc.get('apply_curobo_patches', False)),
+        follow_locked_joints=list((desc.get('follow_locked_joints') or {}).get('joints') or []),
+        follow_locked_joints_topic=str(
+            (desc.get('follow_locked_joints') or {}).get('joint_states_topic')
+            or strategy_params.get('joint_states_topic') or ''),
         _joint_names=fallback_joints,
         _dof=len(fallback_joints) if fallback_joints else None,
     )

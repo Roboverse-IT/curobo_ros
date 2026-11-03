@@ -17,6 +17,7 @@ v2 notes:
 - ground plane lives on the Scene via ObstacleManager, not `world_cfg.add_obstacle`.
 """
 
+import copy
 import threading
 import time
 import traceback
@@ -34,8 +35,12 @@ from std_srvs.srv import Trigger
 from curobo_msgs.srv import TrajectoryGeneration, SetPlanner, GetPlanners
 from curobo_msgs.action import GraspPlan, SendTrajectory
 
+from curobo.config_io import load_yaml
+from curobo.kinematics import Kinematics, KinematicsCfg
 from curobo.types import DeviceCfg, JointState
 
+from curobo_ros.core.locked_joints import (
+    LockedJointFollower, LockedJointTransforms, urdf_joint_limits)
 from curobo_ros.robot.robot_context import RobotContext
 from curobo_ros.core.config_wrapper_motion import ConfigWrapperMotion
 from curobo_ros.core.attachment_services import AttachmentServices
@@ -266,7 +271,11 @@ class UnifiedPlannerNode(Node):
 
         self.planner_manager = PlannerManager(self, self.config_wrapper_motion)
 
-        initial_planner = self.get_parameter('planner_type').get_parameter_value().string_value
+        # Locked joints (e.g. gripper fingers) at their measured value in every
+        # model, from the robot descriptor's follow_locked_joints; None without.
+        self.locked_joints = self._make_locked_joint_follower()
+
+        initial_planner =self.get_parameter('planner_type').get_parameter_value().string_value
         self._warmup_initial_planner(initial_planner)
         self.planner_manager.set_current_planner(initial_planner)
         # Startup warms exactly one solver, so it is already the sole graph
@@ -541,6 +550,87 @@ class UnifiedPlannerNode(Node):
                     self.get_logger().error(f"robot collision spheres in {label}: {e}")
                     failed.append(label)
         return failed
+
+    def _make_locked_joint_follower(self):
+        """The follower of the descriptor's follow_locked_joints; None when it names none.
+
+        Its subscription keeps the latest message only and has no callback: a node no
+        executor spins owns it, and follow_locked_joints takes the message at plan
+        time. A per-message callback costs planning time on an Orin.
+        """
+        description = self.robot_context.description
+        names = list(description.follow_locked_joints)
+        if not names:
+            return None
+        kin = self.config_wrapper_motion.kin_model
+        lock = kin.kinematics_config.lock_jointstate
+        unlocked = [n for n in names if lock is None or n not in lock.joint_names]
+        if unlocked:
+            raise ValueError(f"follow_locked_joints {unlocked} are not locked in the robot model")
+        topic = description.follow_locked_joints_topic
+        if not topic:
+            raise ValueError("follow_locked_joints needs a joint_states_topic")
+        defaults = {n: float(lock.position[..., lock.joint_names.index(n)]) for n in names}
+        config = load_yaml(description.curobo_config_path)
+        urdf_path = config.get('robot_cfg', config)['kinematics']['urdf_path']
+        with open(urdf_path, encoding='utf-8') as urdf:
+            limits = urdf_joint_limits(urdf.read(), names)
+
+        def build(values):
+            robot = copy.deepcopy(config)
+            robot.get('robot_cfg', robot)['kinematics']['lock_joints'].update(values)
+            return Kinematics(KinematicsCfg.from_robot_yaml_file(robot)).kinematics_config \
+                .fixed_transforms
+
+        start = time.perf_counter()
+        transforms = LockedJointTransforms(
+            defaults, build, kin.kinematics_config.fixed_transforms, limits=limits)
+        follower = LockedJointFollower(transforms, limits=limits)
+        self._locked_joints_node = rclpy.create_node(f'{self.get_name()}_locked_joints')
+        self._locked_joints_sub = self._locked_joints_node.create_subscription(
+            JointStateMsg, topic, lambda _: None, 1)
+        self._locked_values = None
+        self.get_logger().info(
+            f"Locked joints {names} follow {topic} (default {defaults}, limits {limits}; "
+            f"transforms of rows {transforms.moving_rows} in {time.perf_counter() - start:.1f}s, "
+            f"checked at {transforms.verified_at}, error {transforms.verification_error:.1e})")
+        return follower
+
+    def _kinematics_configs(self):
+        """The kinematics config of every model that exists: the node's, the
+        solvers', FK's."""
+        models = [self.config_wrapper_motion.kin_model]
+        models += [getattr(s, 'kinematics', None) for _, s in self._solvers()]
+        models.append(getattr(getattr(self, 'fk_services', None), '_fk_model', None))
+        configs, seen = [], set()
+        for model in models:
+            kc = getattr(model, 'kinematics_config', None)
+            if kc is not None and kc.fixed_transforms.data_ptr() not in seen:
+                seen.add(kc.fixed_transforms.data_ptr())
+                configs.append(kc)
+        return configs
+
+    def follow_locked_joints(self):
+        """Put the followed locked joints at their measured value in every model.
+
+        Called before every plan. Returns {name: value}, {} without a follower.
+        """
+        if self.locked_joints is None:
+            return {}
+        sub = self._locked_joints_sub
+        with sub.handle:
+            while (taken := sub.handle.take_message(sub.msg_type, sub.raw)) is not None:
+                self.locked_joints.observe(taken[0].name, taken[0].position)
+        values, sources = self.locked_joints.values()
+        with self.gpu_lock:   # a plan in progress reads these transforms
+            refused = self.locked_joints.apply(values, self._kinematics_configs())
+        if refused:
+            raise RuntimeError(
+                f"{len(refused)} model(s) have another link layout: locked joints not applied")
+        if values != self._locked_values:
+            self.get_logger().info(f"Locked joints {self._locked_values} -> {values} ({sources})")
+            self._locked_values = values
+        return values
 
     def apply_solver_states(self):
         """Robot and obstacle state onto every solver. For a solver just built:
@@ -1117,8 +1207,10 @@ class UnifiedPlannerNode(Node):
         """Return (start_joint_list, start_state) from a request/goal start_pose.
 
         Falls back to the robot's current joint pose when start_pose is empty.
-        Shared by the generate_trajectory service and the execute action.
+        Shared by the generate_trajectory service, the execute and grasp actions:
+        the followed locked joints are brought to their measured value here.
         """
+        self.follow_locked_joints()
         start_pose = getattr(src, 'start_pose', None)
         if start_pose is not None and len(start_pose.position) > 0:
             start_joint_pose = list(start_pose.position)
@@ -1179,6 +1271,7 @@ class UnifiedPlannerNode(Node):
             'target_joints': [float(x) for x in (getattr(req, 'target_joint_positions', []) or [])],
             'tool_frames': list(getattr(req, 'target_tool_frames', []) or []),
             'hold_frames': list(getattr(req, 'hold_tool_frames', []) or []),
+            'locked': dict(getattr(self, '_locked_values', None) or {}),
         }
 
     @staticmethod
@@ -1199,6 +1292,8 @@ class UnifiedPlannerNode(Node):
         if a.get('tool_frames', []) != b.get('tool_frames', []):
             return False
         if a.get('hold_frames', []) != b.get('hold_frames', []):
+            return False
+        if a.get('locked', {}) != b.get('locked', {}):
             return False
         aj, bj = a['target_joints'], b['target_joints']
         if len(aj) != len(bj) or any(abs(x - y) > joint_tol for x, y in zip(aj, bj)):
